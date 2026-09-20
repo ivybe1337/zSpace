@@ -201,7 +201,7 @@ pub const TuiApp = struct {
         out.printRaw(" \x1b[1;37mSmart Recommendations:\x1b[0m\n\n");
         for (suggestions.items, 0..) |sug, idx| {
             var sz_buf: [32]u8 = undefined;
-            const sz_str = types.DiskNode.formatSize(sug.reclaimable_bytes, &sz_buf);
+            const sz_str = types.DiskNode.formatSize(sug.size_bytes, &sz_buf);
 
             const safety_tag = sug.risk.label();
             const color_tag = sug.risk.colorAnsi();

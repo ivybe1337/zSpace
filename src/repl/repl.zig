@@ -772,7 +772,7 @@ pub const Repl = struct {
         var n_review: usize = 0;
         for (items.items) |it| {
             if (it.risk.isLocked()) continue;
-            reclaim += it.reclaimable_bytes;
+            reclaim += it.size_bytes;
             if (it.risk == .Safe_ZeroRisk) {
                 n_safe += 1;
             } else {
