@@ -12,6 +12,11 @@ pub const ScannerConfig = struct {
     follow_symlinks: bool = false,
     include_hidden: bool = true,
     compute_allocated_blocks: bool = true,
+    /// Resource throttle (Option B background-indexer friendly): every
+    /// `yield_every_dirs` visited dirs, sleep `yield_sleep_ns`. Zero = off.
+    /// Keeps incremental reindex CPU well under 5% on large trees.
+    yield_every_dirs: u64 = 0,
+    yield_sleep_ns: u64 = 0,
 };
 
 pub const InodeKey = struct {
