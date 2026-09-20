@@ -7,7 +7,14 @@ const c = @cImport({
     @cInclude("termios.h");
     @cInclude("unistd.h");
     @cInclude("stdlib.h");
+    @cInclude("errno.h");
 });
+
+// Darwin errno accessor (same idiom as cleaner.zig / snapshot.zig).
+extern "c" fn __error() *c_int;
+fn errnoValue() c_int {
+    return __error().*;
+}
 
 pub const SelectError = error{
     NotATty,
@@ -38,15 +45,49 @@ pub const RawMode = struct {
         self.active = false;
     }
 
-    /// Read one key. Returns 0x03 on EOF/Ctrl-D (treated as cancel).
+    /// Read one key, decoding ESC `[` `A`/`B` arrow sequences into `'k'` / `'j'`.
+    ///
+    /// Blocking semantics come from `enter()` (VMIN=1, VTIME=0). A bare ESC
+    /// would otherwise block forever waiting for the rest of a CSI sequence,
+    /// so only after seeing ESC do we switch to a 100ms VTIME window. EINTR is
+    /// retried; EOF/Ctrl-D returns 0x03 (callers treat that as cancel).
     pub fn readKey(self: *RawMode) u8 {
         _ = self;
         var b: u8 = 0;
-        const n = c.read(0, &b, 1);
-        if (n <= 0) return 0x03;
-        return b;
+        if (readByteBlocking(&b) != 1) return 0x03;
+        if (b != 0x1B) return b;
+
+        // ESC: probe briefly for `[` X. Never hang on a bare ESC press.
+        var saved: c.struct_termios = std.mem.zeroes(c.struct_termios);
+        if (c.tcgetattr(0, &saved) != 0) return 0x1B;
+        var probe = saved;
+        probe.c_cc[c.VMIN] = 0;
+        probe.c_cc[c.VTIME] = 1; // 100ms (deciseconds) window
+        if (c.tcsetattr(0, c.TCSANOW, &probe) != 0) return 0x1B;
+        defer _ = c.tcsetattr(0, c.TCSANOW, &saved);
+
+        var bracket: u8 = 0;
+        if (c.read(0, &bracket, 1) != 1 or bracket != '[') return 0x1B;
+        var code: u8 = 0;
+        if (c.read(0, &code, 1) != 1) return 0x1B;
+        return switch (code) {
+            'A' => 'k', // arrow up
+            'B' => 'j', // arrow down
+            'C', 'D' => ' ', // left/right: no horizontal axis; swallow harmlessly
+            else => 0x1B,
+        };
     }
 };
+
+/// One blocking byte read, retrying on EINTR. Returns the byte count
+/// (0 = EOF, -1 = hard error) so callers can distinguish cancel from failure.
+fn readByteBlocking(out_byte: *u8) isize {
+    while (true) {
+        const n = c.read(0, out_byte, 1);
+        if (n < 0 and errnoValue() == c.EINTR) continue;
+        return n;
+    }
+}
 
 pub const SelectableItem = struct {
     id: usize, // SmartCleanItem id for `clean N` interop

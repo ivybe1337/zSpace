@@ -38,60 +38,10 @@ pub const GlobalOpts = struct {
     select: []const u8 = "",  // comma-separated indices like "34,12,7"
 };
 
-/// Unified selectable item for interactive cleanup. Deletion goes through
-/// Cleaner.safeMoveToTrash at the call site; no function-pointer field (Zig
-/// 0.16 forbids inferred-error-set fn types in struct fields — C06 note).
-pub const SelectableItem = struct {
-    id: usize, // Display ID (1-based for user)
-    title: []const u8,
-    path: []const u8,
-    size_bytes: u64,
-    risk: analyzer.RiskLevel,
-    is_quick_win: bool,
-};
-
-/// Interactive selection state
-const SelectionState = struct {
-    items: []SelectableItem,
-    selected: []bool,
-    cursor: usize = 0,
-    scroll_offset: usize = 0,
-    term_height: usize = 24,
-};
-
-/// Parse comma-separated indices like "34,12,7" into a sorted array of 0-based indices
-fn parseSelectionIndices(allocator: std.mem.Allocator, input: []const u8) !std.ArrayList(usize) {
-    var result: std.ArrayList(usize) = .{ .items = &.{}, .capacity = 0 };
-    var iter = std.mem.splitScalar(u8, input, ',');
-    while (iter.next()) |part| {
-        const trimmed = std.mem.trim(u8, part, " \t\r\n");
-        if (trimmed.len == 0) continue;
-        const idx = std.fmt.parseInt(usize, trimmed, 10) catch continue;
-        if (idx > 0) {
-            // Convert 1-based user input to 0-based index
-            try result.append(allocator, idx - 1);
-        }
-    }
-    // Sort and deduplicate
-    std.mem.sort(usize, result.items, {}, std.sort.asc(usize));
-    var deduped: std.ArrayList(usize) = .{ .items = &.{}, .capacity = 0 };
-    defer deduped.deinit(allocator);
-    for (result.items) |idx| {
-        if (deduped.items.len == 0 or deduped.items[deduped.items.len - 1] != idx) {
-            try deduped.append(allocator, idx);
-        }
-    }
-    result.deinit(allocator);
-    return deduped.toOwnedSlice(allocator);
-}
-
-/// Check if an index is in the selection list
-fn isIndexSelected(indices: []const usize, index: usize) bool {
-    for (indices) |i| {
-        if (i == index) return true;
-    }
-    return false;
-}
+/// Unified selectable item for interactive cleanup lives in tui_select
+/// (canonical). Deletion goes through Cleaner.safeMoveToTrash at the
+/// call site; no function-pointer field (Zig 0.16 forbids
+/// inferred-error-set fn types in struct fields — C06 note).
 
 fn logVerbose(opts: GlobalOpts, comptime fmt: []const u8, args: anytype) void {
     if (!opts.verbose) return;
@@ -199,14 +149,6 @@ fn parseCliArgs(allocator: std.mem.Allocator, raw: []const []const u8) !ParsedAr
             i += 1;
             if (i >= raw.len) return error.MissingFlagValue;
             opts.min_size = parseMinSize(raw[i]) catch return error.InvalidMinSize;
-        } else if (std.mem.eql(u8, arg, "--interactive") or std.mem.eql(u8, arg, "-i")) {
-            opts.interactive = true;
-        } else if (std.mem.startsWith(u8, arg, "--select=")) {
-            opts.select = arg["--select=".len..];
-        } else if (std.mem.eql(u8, arg, "--select")) {
-            i += 1;
-            if (i >= raw.len) return error.MissingFlagValue;
-            opts.select = raw[i];
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             if (command != null) {
                 command_help = true;
@@ -677,22 +619,17 @@ fn runCleanCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts)
         defer if (mask_owned) allocator.free(chosen_mask);
 
         if (opts.select.len > 0) {
-            chosen_mask = tui_select.parseSelectionSpec(
-                allocator,
-                opts.select,
-                items.items.len,
-                struct {
-                    fn isSafe(i: usize) bool {
-                        // Placeholder predicate; real risk check happens at
-                        // the call site below via `items` (parser is generic).
-                        _ = i;
-                        return false;
-                    }
-                }.isSafe,
-            ) catch {
-                out.printRaw("error: invalid --select spec (expected e.g. 34,12 / 3-7 / all / safe)\n\n");
-                return;
-            };
+            if (std.ascii.eqlIgnoreCase(opts.select, "safe")) {
+                // Real risk check: Safe_ZeroRisk only. The generic parser
+                // predicate is context-free so `safe` is built manually here.
+                chosen_mask = try allocator.alloc(bool, items.items.len);
+                for (items.items, 0..) |it, i| chosen_mask[i] = it.risk == .Safe_ZeroRisk;
+            } else {
+                chosen_mask = tui_select.parseSelectionSpec(allocator, opts.select, items.items.len, null) catch {
+                    out.printRaw("error: invalid --select spec (expected e.g. 34,12 / 3-7 / all / safe)\n\n");
+                    return;
+                };
+            }
             mask_owned = true;
         } else {
             // Interactive checkbox selection (skips LOCKED items).
@@ -818,10 +755,17 @@ fn runWinsCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts) 
         }
         var mask: []bool = undefined;
         if (opts.select.len > 0) {
-            mask = tui_select.parseSelectionSpec(allocator, opts.select, win_item_idx.items.len, null) catch {
-                out.printRaw("error: invalid --select spec (expected e.g. 2,3 / 1-3 / all)\n\n");
-                return;
-            };
+            if (std.ascii.eqlIgnoreCase(opts.select, "safe")) {
+                // Real risk check: Safe_ZeroRisk only (subset of quick-wins).
+                mask = try allocator.alloc(bool, win_item_idx.items.len);
+                errdefer allocator.free(mask);
+                for (win_item_idx.items, 0..) |item_i, i| mask[i] = items.items[item_i].risk == .Safe_ZeroRisk;
+            } else {
+                mask = tui_select.parseSelectionSpec(allocator, opts.select, win_item_idx.items.len, null) catch {
+                    out.printRaw("error: invalid --select spec (expected e.g. 2,3 / 1-3 / all)\n\n");
+                    return;
+                };
+            }
         } else {
             var sel_items = try allocator.alloc(tui_select.SelectableItem, win_item_idx.items.len);
             defer allocator.free(sel_items);
