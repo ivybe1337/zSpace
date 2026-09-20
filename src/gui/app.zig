@@ -82,13 +82,11 @@ fn sendNoArgRet(target: ObjCId, sel: ObjCSel) ObjCId {
 }
 
 fn sendStringWithUTF8(cls: ObjCClass, sel: ObjCSel, cstr: []const u8) ObjCId {
-    // Ensure null-termination for ObjC
-    var buf: [4096]u8 = undefined;
-    if (cstr.len >= buf.len) return null;
-    @memcpy(buf[0..cstr.len], cstr);
-    buf[cstr.len] = 0;
+    // Null-terminate via heap dupeZ (index.html exceeds any stack buffer).
+    const z = std.heap.c_allocator.dupeZ(u8, cstr) catch return null;
+    defer std.heap.c_allocator.free(z);
     const F = *const fn (ObjCClass, ObjCSel, [*c]const u8) callconv(.c) ObjCId;
-    return @as(F, @ptrCast(&objc_msgSend))(cls, sel, &buf[0]);
+    return @as(F, @ptrCast(&objc_msgSend))(cls, sel, z);
 }
 
 fn sendColor(cls: ObjCClass, sel: ObjCSel, r: f64, g: f64, b: f64, a: f64) ObjCId {
