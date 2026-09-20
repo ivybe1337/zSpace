@@ -211,6 +211,157 @@ pub const JournalTailEntry = struct {
     line: []const u8,
 };
 
+// --- Minimal JSONL journal reader -------------------------------------------
+// The journal is a flat JSON object per line, written by `jsonEscapeInto` +
+// `persistJournalLine`. Hydration reads it with a strict left-to-right scanner
+// rather than substring search, so a `"key":` sequence occurring *inside* a
+// value (e.g. a path literally containing `"dst":`) can never be misparsed.
+
+/// Stack scratch for one parsed record. Owned by the caller so the returned
+/// record's slices stay valid for the caller's scope (never returned by value
+/// out of a frame that owns them).
+pub const JournalScratch = struct {
+    op: [16]u8 = undefined,
+    receipt: [80]u8 = undefined,
+    src: [4096]u8 = undefined,
+    dst: [4096]u8 = undefined,
+    blake3: [80]u8 = undefined,
+    key: [32]u8 = undefined,
+};
+
+pub const JournalRecord = struct {
+    op: []u8 = &.{},
+    receipt: []u8 = &.{},
+    src: []u8 = &.{},
+    dst: []u8 = &.{},
+    blake3: []u8 = &.{},
+    size: u64 = 0,
+    ts: i128 = 0,
+};
+
+fn skipJsonWs(line: []const u8, i: *usize) void {
+    while (i.* < line.len and std.ascii.isWhitespace(line[i.*])) i.* += 1;
+}
+
+/// Decode a JSON string beginning at `line[i.*]` (the opening quote) into `out`.
+/// Advances `i.*` past the closing quote. Returns null on malformed input or if
+/// the decoded value does not fit `out` (strict — silently truncating a path
+/// would be a correctness bug, not a convenience).
+fn readJsonString(line: []const u8, i: *usize, out: []u8) ?[]u8 {
+    if (i.* >= line.len or line[i.*] != '"') return null;
+    i.* += 1;
+    var n: usize = 0;
+    while (i.* < line.len) {
+        const ch = line[i.*];
+        if (ch == '"') {
+            i.* += 1;
+            return out[0..n];
+        }
+        if (ch == '\\') {
+            if (i.* + 1 >= line.len) return null;
+            const esc = line[i.* + 1];
+            if (esc == 'u') {
+                if (i.* + 5 >= line.len) return null;
+                const cp = std.fmt.parseInt(u21, line[i.* + 2 .. i.* + 6], 16) catch return null;
+                // Our writer only emits \uXXXX for control bytes (<= 0x1F).
+                if (cp > 0xFF) return null;
+                if (n >= out.len) return null;
+                out[n] = @intCast(cp);
+                n += 1;
+                i.* += 6;
+                continue;
+            }
+            const decoded: u8 = switch (esc) {
+                '"' => '"',
+                '\\' => '\\',
+                '/' => '/',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                'b' => 0x08,
+                'f' => 0x0C,
+                else => return null,
+            };
+            if (n >= out.len) return null;
+            out[n] = decoded;
+            n += 1;
+            i.* += 2;
+            continue;
+        }
+        if (n >= out.len) return null;
+        out[n] = ch;
+        n += 1;
+        i.* += 1;
+    }
+    return null; // unterminated
+}
+
+/// Parse one flat journal object into `scratch`-backed slices.
+fn parseJournalLine(line: []const u8, scratch: *JournalScratch) ?JournalRecord {
+    var rec = JournalRecord{};
+    var i: usize = 0;
+    skipJsonWs(line, &i);
+    if (i >= line.len or line[i] != '{') return null;
+    i += 1;
+    while (true) {
+        skipJsonWs(line, &i);
+        if (i >= line.len) return null;
+        if (line[i] == '}') return rec;
+        if (line[i] == ',') {
+            i += 1;
+            continue;
+        }
+        if (line[i] != '"') return null;
+        const key = readJsonString(line, &i, &scratch.key) orelse return null;
+        skipJsonWs(line, &i);
+        if (i >= line.len or line[i] != ':') return null;
+        i += 1;
+        skipJsonWs(line, &i);
+        if (i >= line.len) return null;
+
+        if (line[i] == '"') {
+            const slot: []u8 = if (std.mem.eql(u8, key, "op"))
+                &scratch.op
+            else if (std.mem.eql(u8, key, "receipt"))
+                &scratch.receipt
+            else if (std.mem.eql(u8, key, "src"))
+                &scratch.src
+            else if (std.mem.eql(u8, key, "dst"))
+                &scratch.dst
+            else if (std.mem.eql(u8, key, "blake3"))
+                &scratch.blake3
+            else
+                &.{};
+            if (slot.len == 0) {
+                // Unknown string field: consume its value, then ignore it.
+                var sink: [4096]u8 = undefined;
+                _ = readJsonString(line, &i, &sink) orelse return null;
+                continue;
+            }
+            const val = readJsonString(line, &i, slot) orelse return null;
+            if (std.mem.eql(u8, key, "op")) rec.op = val else if (std.mem.eql(u8, key, "receipt")) rec.receipt = val else if (std.mem.eql(u8, key, "src")) rec.src = val else if (std.mem.eql(u8, key, "dst")) rec.dst = val else rec.blake3 = val;
+        } else {
+            const start = i;
+            while (i < line.len and line[i] != ',' and line[i] != '}') i += 1;
+            const num = std.mem.trim(u8, line[start..i], " \t\r\n");
+            if (std.mem.eql(u8, key, "size")) rec.size = std.fmt.parseInt(u64, num, 10) catch 0 else if (std.mem.eql(u8, key, "ts")) rec.ts = std.fmt.parseInt(i128, num, 10) catch 0;
+        }
+    }
+}
+
+/// Decode 64 lowercase hex chars into a 32-byte digest. Returns zeros if the
+/// slice is not exactly 64 valid hex chars (e.g. the `"0"` placeholder dirs use).
+fn hexToDigest(hex: []const u8) [32]u8 {
+    var out = [_]u8{0} ** 32;
+    if (hex.len != 64) return out;
+    for (0..32) |k| {
+        const hi = std.fmt.charToDigit(hex[k * 2], 16) catch return [_]u8{0} ** 32;
+        const lo = std.fmt.charToDigit(hex[k * 2 + 1], 16) catch return [_]u8{0} ** 32;
+        out[k] = (hi << 4) | lo;
+    }
+    return out;
+}
+
 
 pub const Cleaner = struct {
     allocator: std.mem.Allocator,
@@ -220,25 +371,28 @@ pub const Cleaner = struct {
     pub fn init(allocator: std.mem.Allocator) !Cleaner {
         // C04 tests redirect via ZSPACE_TRASH_DIR / ZSPACE_JOURNAL_PATH so
         // `zig build test` never touches the real ~/.Trash or journal.
-        if (c.getenv("ZSPACE_TRASH_DIR")) |v| {
-            const s = std.mem.span(@as([*:0]const u8, @ptrCast(v)));
-            if (s.len > 0) {
-                return .{
+        var cl = blk: {
+            if (c.getenv("ZSPACE_TRASH_DIR")) |v| {
+                const s = std.mem.span(@as([*:0]const u8, @ptrCast(v)));
+                if (s.len > 0) break :blk Cleaner{
                     .allocator = allocator,
                     .trash_dir_path = try allocator.dupe(u8, s),
                     .journal = .{ .items = &.{}, .capacity = 0 },
                 };
             }
-        }
-        const home_c = c.getenv("HOME");
-        const home = if (home_c != null) std.mem.span(@as([*:0]const u8, @ptrCast(home_c))) else "/Users/joshua";
-        const trash_path = try std.fs.path.join(allocator, &.{ home, ".Trash" });
-
-        return .{
-            .allocator = allocator,
-            .trash_dir_path = trash_path,
-            .journal = .{ .items = &.{}, .capacity = 0 },
+            const home_c = c.getenv("HOME");
+            const home = if (home_c != null) std.mem.span(@as([*:0]const u8, @ptrCast(home_c))) else "/Users/joshua";
+            break :blk Cleaner{
+                .allocator = allocator,
+                .trash_dir_path = try std.fs.path.join(allocator, &.{ home, ".Trash" }),
+                .journal = .{ .items = &.{}, .capacity = 0 },
+            };
         };
+        // Restore the undo window from the on-disk journal so `undo <receipt>`
+        // and `U` keep working after the process exits (the file is the source
+        // of truth; memory is only a cache). Best-effort: never fatal.
+        cl.hydrateJournalFromDisk(10_000);
+        return cl;
     }
 
     pub fn deinit(self: *Cleaner) void {
@@ -536,6 +690,110 @@ pub const Cleaner = struct {
         return null;
     }
 
+    /// Repopulate `self.journal` from the on-disk JSONL journal so `undo` and
+    /// `U` work across process restarts. The journal file is the source of
+    /// truth; in-process memory is only a cache.
+    ///
+    /// Records whose receipt also appears on an `"op":"undo"` line are skipped
+    /// (already restored). Bounded: reads at most ~64MB and keeps at most
+    /// `max_records` most-recent trash operations. Best-effort by design —
+    /// hydration failure must never prevent the Cleaner from being usable.
+    pub fn hydrateJournalFromDisk(self: *Cleaner, max_records: usize) void {
+        const jp = journalFilePath(self.allocator) catch return;
+        defer self.allocator.free(jp);
+
+        const data = readWholeFileLibc(self.allocator, jp, 1 << 26) catch return;
+        defer self.allocator.free(data);
+
+        var undone: std.ArrayList([]u8) = .{ .items = &.{}, .capacity = 0 };
+        defer {
+            for (undone.items) |r| self.allocator.free(r);
+            undone.deinit(self.allocator);
+        }
+
+        // Pass 1: receipts that have already been restored.
+        var it = std.mem.splitScalar(u8, data, '\n');
+        while (it.next()) |line| {
+            if (line.len == 0) continue;
+            var scratch = JournalScratch{};
+            const rec = parseJournalLine(line, &scratch) orelse continue;
+            if (!std.mem.eql(u8, rec.op, "undo")) continue;
+            if (rec.receipt.len == 0) continue;
+            const dup = self.allocator.dupe(u8, rec.receipt) catch continue;
+            undone.append(self.allocator, dup) catch {
+                self.allocator.free(dup);
+                continue;
+            };
+        }
+
+        // Pass 2: trash records not yet undone, capped to the newest
+        // `max_records` entries (the rest are beyond any practical undo window).
+        var it2 = std.mem.splitScalar(u8, data, '\n');
+        while (it2.next()) |line| {
+            if (line.len == 0) continue;
+            var scratch = JournalScratch{};
+            const rec = parseJournalLine(line, &scratch) orelse continue;
+            if (!std.mem.eql(u8, rec.op, "trash")) continue;
+            if (rec.receipt.len == 0 or rec.src.len == 0 or rec.dst.len == 0) continue;
+
+            var already = false;
+            for (undone.items) |r| {
+                if (std.mem.eql(u8, r, rec.receipt)) {
+                    already = true;
+                    break;
+                }
+            }
+            if (already) continue;
+            for (self.journal.items) |existing| {
+                if (std.mem.eql(u8, existing.receipt_id, rec.receipt)) {
+                    already = true;
+                    break;
+                }
+            }
+            if (already) continue;
+
+            const orig = self.allocator.dupe(u8, rec.src) catch continue;
+            const tpath = self.allocator.dupe(u8, rec.dst) catch {
+                self.allocator.free(orig);
+                continue;
+            };
+            const rid = self.allocator.dupe(u8, rec.receipt) catch {
+                self.allocator.free(orig);
+                self.allocator.free(tpath);
+                continue;
+            };
+            const digest = hexToDigest(rec.blake3);
+            self.journal.append(self.allocator, .{
+                .original_path = orig,
+                .trash_path = tpath,
+                .size_bytes = rec.size,
+                .timestamp_ns = rec.ts,
+                .verified_hash = std.hash.Wyhash.hash(0, &digest),
+                .blake3 = digest,
+                .receipt_id = rid,
+                .method = .nsfilemanager,
+            }) catch {
+                self.allocator.free(orig);
+                self.allocator.free(tpath);
+                self.allocator.free(rid);
+                continue;
+            };
+        }
+
+        // Keep only the newest `max_records` entries (journal is append-only,
+        // so order of insertion here is oldest→newest).
+        if (self.journal.items.len > max_records) {
+            const drop = self.journal.items.len - max_records;
+            for (self.journal.items[0..drop]) |op| {
+                self.allocator.free(op.original_path);
+                self.allocator.free(op.trash_path);
+                if (op.receipt_id.len > 0) self.allocator.free(op.receipt_id);
+            }
+            std.mem.copyForwards(types.CleanOperation, self.journal.items[0 .. self.journal.items.len - drop], self.journal.items[drop..]);
+            self.journal.items.len -= drop;
+        }
+    }
+
     /// Read the last `max_lines` entries of the on-disk JSONL journal
     /// (oldest→newest order preserved within the returned tail). Returns lines
     /// verbatim including the trailing JSON; caller frees each `.line` and the
@@ -560,6 +818,7 @@ pub const Cleaner = struct {
         };
         defer allocator.free(data);
 
+        if (max_lines == 0) return out_list;
         // Ring-buffer the tail: keep last max_lines non-empty lines.
         var ring = try allocator.alloc([]const u8, max_lines);
         defer allocator.free(ring);
@@ -576,8 +835,16 @@ pub const Cleaner = struct {
                 head = (head + 1) % max_lines;
             }
         }
-        for (ring[0..ring_len]) |line| {
-            try out_list.append(allocator, .{ .line = try allocator.dupe(u8, line) });
+        // Emit oldest→newest: when wrapped, start at head (oldest kept).
+        if (ring_len < max_lines) {
+            for (ring[0..ring_len]) |line| {
+                try out_list.append(allocator, .{ .line = try allocator.dupe(u8, line) });
+            }
+        } else {
+            for (0..max_lines) |k| {
+                const line = ring[(head + k) % max_lines];
+                try out_list.append(allocator, .{ .line = try allocator.dupe(u8, line) });
+            }
         }
         return out_list;
     }
@@ -645,3 +912,123 @@ pub const Cleaner = struct {
         return self.restoreOperation(op);
     }
 };
+
+// --- Journal reader tests ---------------------------------------------------
+// These lock the parser contract: our writer's escaping must round-trip, and a
+// `"key":` sequence inside a *value* must never be misread as a field.
+
+test "parseJournalLine: plain trash record" {
+    var scratch = JournalScratch{};
+    const line = "{\"op\":\"trash\",\"receipt\":\"a1b2c3d4e5f60718\",\"src\":\"/tmp/x.bin\",\"dst\":\"/Users/u/.Trash/x.bin\",\"blake3\":\"00\",\"size\":4096,\"ts\":1234567890,\"method\":\"nsfilemanager\"}";
+    const rec = parseJournalLine(line, &scratch) orelse return error.ParseFailed;
+    try std.testing.expectEqualStrings("trash", rec.op);
+    try std.testing.expectEqualStrings("a1b2c3d4e5f60718", rec.receipt);
+    try std.testing.expectEqualStrings("/tmp/x.bin", rec.src);
+    try std.testing.expectEqualStrings("/Users/u/.Trash/x.bin", rec.dst);
+    try std.testing.expectEqualStrings("00", rec.blake3);
+    try std.testing.expectEqual(@as(u64, 4096), rec.size);
+    try std.testing.expectEqual(@as(i128, 1234567890), rec.ts);
+}
+
+test "parseJournalLine: escaped values round-trip" {
+    var scratch = JournalScratch{};
+    // A path containing a quote, a backslash, a newline and a tab.
+    const line = "{\"op\":\"trash\",\"receipt\":\"ff\",\"src\":\"/a\\\"b\\\\c\\nd\\te\",\"dst\":\"/t\",\"size\":1,\"ts\":2}";
+    const rec = parseJournalLine(line, &scratch) orelse return error.ParseFailed;
+    try std.testing.expectEqualStrings("/a\"b\\c\nd\te", rec.src);
+}
+
+test "parseJournalLine: key-like text inside a value is not a field" {
+    var scratch = JournalScratch{};
+    // `src` literally contains the text  "dst":"/evil" . A substring search for
+    // `"dst":` would return the wrong value; the sequential scanner must not.
+    const line = "{\"op\":\"trash\",\"receipt\":\"aa\",\"src\":\"/x/\\\"dst\\\":\\\"/evil\\\"\",\"dst\":\"/real/trash\",\"size\":7,\"ts\":9}";
+    const rec = parseJournalLine(line, &scratch) orelse return error.ParseFailed;
+    try std.testing.expectEqualStrings("/x/\"dst\":\"/evil\"", rec.src);
+    try std.testing.expectEqualStrings("/real/trash", rec.dst);
+}
+
+test "parseJournalLine: rejects malformed input" {
+    var scratch = JournalScratch{};
+    try std.testing.expect(parseJournalLine("not json", &scratch) == null);
+    try std.testing.expect(parseJournalLine("{\"op\":\"trash\"", &scratch) == null);
+    try std.testing.expect(parseJournalLine("", &scratch) == null);
+}
+
+test "hexToDigest: valid, wrong length, invalid chars" {
+    const zero32 = "0000000000000000000000000000000000000000000000000000000000000000";
+    try std.testing.expectEqual([_]u8{0} ** 32, hexToDigest(zero32));
+
+    const ff32 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    try std.testing.expectEqual([_]u8{0xFF} ** 32, hexToDigest(ff32));
+
+    // Contract: any deviation yields all-zeros rather than a partial digest.
+    try std.testing.expectEqual([_]u8{0} ** 32, hexToDigest("0"));
+    try std.testing.expectEqual([_]u8{0} ** 32, hexToDigest(""));
+    try std.testing.expectEqual([_]u8{0} ** 32, hexToDigest("zz00000000000000000000000000000000000000000000000000000000000000"));
+}
+
+// Simulates process restart: a journal written by a *previous* process must be
+// readable by a *new* Cleaner, and receipts already undone must not be
+// re-offered. This is the regression gate for "undo silently fails after
+// restart", which was the pre-fix behaviour (in-memory-only journal).
+test "hydrateJournalFromDisk: undo survives restart, undone receipts excluded" {
+    const allocator = std.testing.allocator;
+    const tio = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(tio, "h/.Trash");
+    var path_buf: [4096]u8 = undefined;
+    const abs_len = try tmp.dir.realPath(tio, &path_buf);
+    const abs = path_buf[0..abs_len];
+
+    const journal_path = try std.fmt.allocPrint(allocator, "{s}/h/journal.jsonl", .{abs});
+    defer allocator.free(journal_path);
+    const trash_dir = try std.fmt.allocPrint(allocator, "{s}/h/.Trash", .{abs});
+    defer allocator.free(trash_dir);
+
+    // Two trash ops; the second has already been undone in a prior session.
+    const digest_a = "ab" ** 32;
+    const body = try std.fmt.allocPrint(allocator,
+        \\{{"op":"trash","receipt":"1111111111111111","src":"/tmp/keepme.bin","dst":"/t/keepme.bin","blake3":"{s}","size":2048,"ts":100}}
+        \\{{"op":"trash","receipt":"2222222222222222","src":"/tmp/gone.bin","dst":"/t/gone.bin","blake3":"00","size":99,"ts":200}}
+        \\{{"op":"undo","receipt":"2222222222222222","src":"/t/gone.bin","dst":"/tmp/gone.bin","blake3":"00","size":99,"ts":300}}
+        \\
+    , .{digest_a});
+    defer allocator.free(body);
+    try tmp.dir.writeFile(tio, .{ .sub_path = "h/journal.jsonl", .data = body });
+
+    // Point the Cleaner at the hermetic journal/trash paths.
+    var jz: [4096]u8 = undefined;
+    var tz: [4096]u8 = undefined;
+    try std.testing.expect(journal_path.len < jz.len and trash_dir.len < tz.len);
+    @memcpy(jz[0..journal_path.len], journal_path);
+    jz[journal_path.len] = 0;
+    @memcpy(tz[0..trash_dir.len], trash_dir);
+    tz[trash_dir.len] = 0;
+    _ = c.setenv("ZSPACE_JOURNAL_PATH", @as([*:0]const u8, @ptrCast(&jz)), 1);
+    defer _ = c.unsetenv("ZSPACE_JOURNAL_PATH");
+    _ = c.setenv("ZSPACE_TRASH_DIR", @as([*:0]const u8, @ptrCast(&tz)), 1);
+    defer _ = c.unsetenv("ZSPACE_TRASH_DIR");
+
+    var cl = try Cleaner.init(allocator);
+    defer cl.deinit();
+
+    // Fresh process sees the prior session's still-undoable op.
+    const found = cl.findByReceipt("1111111111111111") orelse return error.HydrationMissing;
+    try std.testing.expectEqualStrings("/tmp/keepme.bin", found.original_path);
+    try std.testing.expectEqualStrings("/t/keepme.bin", found.trash_path);
+    try std.testing.expectEqual(@as(u64, 2048), found.size_bytes);
+    try std.testing.expectEqualStrings(digest_a, &hexFmt(found.blake3));
+
+    // The already-undone receipt must NOT be offered again.
+    try std.testing.expect(cl.findByReceipt("2222222222222222") == null);
+}
+
+fn hexFmt(digest: [32]u8) [64]u8 {
+    var buf: [64]u8 = undefined;
+    _ = blake3Hex(digest, &buf);
+    return buf;
+}
