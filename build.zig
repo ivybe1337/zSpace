@@ -63,7 +63,10 @@ pub fn build(b: *std.Build) void {
         \\cp dist/ZSpace.app/Contents/Info.plist /Users/joshua/Applications/ZSpace.app/Contents/Info.plist
         \\cp assets/AppIcon.icns /Users/joshua/Applications/ZSpace.app/Contents/Resources/AppIcon.icns
         \\codesign --force --deep --sign - /Users/joshua/Applications/ZSpace.app
-        \\cp -R /Users/joshua/Applications/ZSpace.app /Applications/ZSpace.app 2>/dev/null || true
+        \\mkdir -p /Applications/ZSpace.app/Contents/MacOS /Applications/ZSpace.app/Contents/Resources 2>/dev/null || true
+        \\cp zig-out/bin/zspace /Applications/ZSpace.app/Contents/MacOS/ZSpace 2>/dev/null || true
+        \\cp dist/ZSpace.app/Contents/Info.plist /Applications/ZSpace.app/Contents/Info.plist 2>/dev/null || true
+        \\cp assets/AppIcon.icns /Applications/ZSpace.app/Contents/Resources/AppIcon.icns 2>/dev/null || true
         \\codesign --force --deep --sign - /Applications/ZSpace.app 2>/dev/null || true
     });
     install_app_cmd.step.dependOn(b.getInstallStep());

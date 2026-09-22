@@ -43,6 +43,21 @@ pub const UIState = struct {
 
 pub var global_ui_state: ?*UIState = null;
 
+pub var view_header: cocoa.id = null;
+pub var view_status: cocoa.id = null;
+pub var view_sidebar: cocoa.id = null;
+pub var view_treemap: cocoa.id = null;
+pub var view_sunburst: cocoa.id = null;
+
+pub fn requestRedraw() void {
+    ensureSelectors();
+    if (view_header) |v| cocoa.sendVoidBool(v, sel_setNeedsDisplay, true);
+    if (view_status) |v| cocoa.sendVoidBool(v, sel_setNeedsDisplay, true);
+    if (view_sidebar) |v| cocoa.sendVoidBool(v, sel_setNeedsDisplay, true);
+    if (view_treemap) |v| cocoa.sendVoidBool(v, sel_setNeedsDisplay, true);
+    if (view_sunburst) |v| cocoa.sendVoidBool(v, sel_setNeedsDisplay, true);
+}
+
 // --- Custom View Selectors & Types -----------------------------------------
 
 var sel_drawRect: cocoa.SEL = null;
@@ -95,6 +110,14 @@ fn drawHeaderRect(_: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.c) v
     cocoa.CGContextSetStrokeColorWithColor(ctx, glow_color);
     cocoa.CGContextSetLineWidth(ctx, 2.0);
     cocoa.CGContextStrokeEllipseInRect(ctx, cocoa.NSRect.init(15, dirty.h / 2.0 - 8.0, 16, 16));
+
+    // Brand and Mode Title
+    cocoa.drawStringAtPoint("ZSPACE  //  SPACETIME DISK INTELLIGENCE", 42, dirty.h / 2.0 - 7.0);
+
+    const state = global_ui_state orelse return;
+    if (state.root_node) |r| {
+        cocoa.drawStringAtPoint(r.path, 380, dirty.h / 2.0 - 7.0);
+    }
 }
 
 // --- 2. SunburstView: Radial Spacetime Visualizer ---------------------------
@@ -123,6 +146,11 @@ fn drawSunburstRect(self: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(
 
     var arcs = layout.generateLayout(node) catch return;
     defer arcs.deinit(state.allocator);
+
+    if (arcs.items.len == 0) {
+        cocoa.drawStringAtPoint("Analyzing spacetime radial distribution...", center_x - 130, center_y - 7);
+        return;
+    }
 
     for (arcs.items) |arc| {
         cocoa.CGContextBeginPath(ctx);
@@ -192,6 +220,11 @@ fn drawTreemapRect(self: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.
     var rects = layout.layout(node, 2.0, 2.0, @floatCast(bounds.w - 4.0), @floatCast(bounds.h - 4.0)) catch return;
     defer rects.deinit(state.allocator);
 
+    if (rects.items.len == 0) {
+        cocoa.drawStringAtPoint("Generating squarified treemap...", bounds.w / 2.0 - 100, bounds.h / 2.0 - 7);
+        return;
+    }
+
     for (rects.items) |r| {
         const rect = cocoa.NSRect.init(r.x, r.y, r.w, r.h);
 
@@ -236,6 +269,11 @@ fn drawSidebarRect(_: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.c) 
     const state = global_ui_state orelse return;
     const node = state.drill_node orelse state.root_node orelse return;
 
+    if (node.children.items.len == 0) {
+        cocoa.drawStringAtPoint("Scanning directory in background...", 34, dirty.h / 2.0);
+        return;
+    }
+
     // Draw row items
     var y: f64 = dirty.h - 32.0;
     const row_height: f64 = 28.0;
@@ -273,6 +311,15 @@ fn drawSidebarRect(_: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.c) 
         defer cocoa.CGColorRelease(dot_color);
         cocoa.CGContextSetFillColorWithColor(ctx, dot_color);
         cocoa.CGContextFillEllipseInRect(ctx, cocoa.NSRect.init(34, y + 7, 8, 8));
+
+        // File/Folder Name
+        const name_slice = if (child.name.len > 26) child.name[0..26] else child.name;
+        cocoa.drawStringAtPoint(name_slice, 50, y + 4);
+
+        // Size String on Right
+        var sz_buf: [32]u8 = undefined;
+        const sz_str = types.DiskNode.formatSize(child.size_bytes, &sz_buf);
+        cocoa.drawStringAtPoint(sz_str, dirty.w - 90, y + 4);
 
         y -= row_height;
     }
@@ -326,6 +373,9 @@ fn drawStatusRect(_: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.c) v
 
     const state = global_ui_state orelse return;
 
+    // Status text on left
+    cocoa.drawStringAtPoint(state.status_text, 18, dirty.h / 2.0 - 7.0);
+
     // Daemon status pill on right
     const pill_color = if (state.daemon_enabled)
         cocoa.makeCGColor(0x00E676, 0.9) // Active Green
@@ -335,6 +385,7 @@ fn drawStatusRect(_: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.c) v
 
     cocoa.CGContextSetFillColorWithColor(ctx, pill_color);
     cocoa.CGContextFillEllipseInRect(ctx, cocoa.NSRect.init(dirty.w - 120, dirty.h / 2.0 - 4.0, 8, 8));
+    cocoa.drawStringAtPoint(state.daemon_status, dirty.w - 105, dirty.h / 2.0 - 7.0);
 }
 
 // --- Class Registration Factory --------------------------------------------

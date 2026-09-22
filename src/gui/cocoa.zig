@@ -84,7 +84,12 @@ pub extern "c" fn NSGraphicsContextCurrentContext() id;
 
 // --- Grand Central Dispatch (GCD) ------------------------------------------
 
-pub extern "c" fn dispatch_get_main_queue() ?*anyopaque;
+pub extern "c" var _dispatch_main_q: anyopaque;
+
+pub inline fn dispatch_get_main_queue() ?*anyopaque {
+    return &_dispatch_main_q;
+}
+
 pub extern "c" fn dispatch_get_global_queue(identifier: isize, flags: usize) ?*anyopaque;
 pub extern "c" fn dispatch_async_f(queue: ?*anyopaque, context: ?*anyopaque, work: *const fn (?*anyopaque) callconv(.c) void) void;
 
@@ -184,3 +189,11 @@ pub fn getCurrentGraphicsContext() CGContextRef {
     const F = *const fn (id, SEL) callconv(.c) CGContextRef;
     return @as(F, @ptrCast(&objc_msgSend))(ctx, sel_CGContext);
 }
+
+pub fn drawStringAtPoint(text: []const u8, x: f64, y: f64) void {
+    const str = nsString(text) orelse return;
+    const sel_drawAtPoint = sel_registerName("drawAtPoint:withAttributes:");
+    const F = *const fn (id, SEL, NSPoint, id) callconv(.c) void;
+    @as(F, @ptrCast(&objc_msgSend))(str, sel_drawAtPoint, .{ .x = x, .y = y }, null);
+}
+

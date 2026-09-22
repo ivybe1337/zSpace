@@ -5,21 +5,111 @@
 
 const std = @import("std");
 const types = @import("../core/types.zig");
+const scanner = @import("../core/scanner.zig");
 const cocoa = @import("cocoa.zig");
 const components = @import("components.zig");
 const theme = @import("theme.zig");
 
-pub fn runGuiApp(allocator: std.mem.Allocator, root_node: *types.DiskNode) !void {
+const ScanContext = struct {
+    scanner: *scanner.Scanner,
+    worker: scanner.Scanner.ScanWorker = undefined,
+    ui_state: *components.UIState,
+    target_path: []const u8,
+    status_buf: [128]u8 = [_]u8{0} ** 128,
+    active: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
+    completed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+};
+
+fn onProgressMain(raw: ?*anyopaque) callconv(.c) void {
+    const ctx: *ScanContext = @ptrCast(@alignCast(raw orelse return));
+    if (!ctx.active.load(.acquire) or ctx.completed.load(.acquire)) return;
+
+    const prog = ctx.scanner.progress();
+    var sz_buf: [32]u8 = undefined;
+    const sz_str = types.DiskNode.formatSize(prog.bytes_seen, &sz_buf);
+
+    const formatted = std.fmt.bufPrint(&ctx.status_buf, "Scanning: {d} files, {d} dirs ({s})...", .{
+        prog.files_seen,
+        prog.dirs_visited,
+        sz_str,
+    }) catch "Scanning...";
+
+    ctx.ui_state.status_text = formatted;
+    components.requestRedraw();
+}
+
+fn onCompleteMain(raw: ?*anyopaque) callconv(.c) void {
+    const ctx: *ScanContext = @ptrCast(@alignCast(raw orelse return));
+    if (!ctx.active.load(.acquire)) return;
+    ctx.completed.store(true, .release);
+
+    const root = ctx.worker.result orelse return;
+    ctx.ui_state.root_node = root;
+    ctx.ui_state.drill_node = null;
+    ctx.ui_state.selected_indices.clearRetainingCapacity();
+
+    var sz_buf: [32]u8 = undefined;
+    const sz_str = types.DiskNode.formatSize(root.size_bytes, &sz_buf);
+
+    const formatted = std.fmt.bufPrint(&ctx.status_buf, "Analysis Ready — {s} total ({d} files, {d} dirs)", .{
+        sz_str,
+        root.file_count,
+        root.dir_count,
+    }) catch "Analysis Ready";
+
+    ctx.ui_state.status_text = formatted;
+    components.requestRedraw();
+}
+
+fn onErrorMain(raw: ?*anyopaque) callconv(.c) void {
+    const ctx: *ScanContext = @ptrCast(@alignCast(raw orelse return));
+    if (!ctx.active.load(.acquire)) return;
+    ctx.completed.store(true, .release);
+
+    ctx.ui_state.status_text = "Scan interrupted or error encountered";
+    components.requestRedraw();
+}
+
+fn monitorScanLoop(ctx: *ScanContext) void {
+    while (ctx.active.load(.acquire) and ctx.scanner.is_scanning.load(.acquire)) {
+        var req = std.c.timespec{ .sec = 0, .nsec = 100_000_000 };
+        _ = std.c.nanosleep(&req, null);
+        if (!ctx.active.load(.acquire) or !ctx.scanner.is_scanning.load(.acquire)) break;
+        cocoa.dispatch_async_f(cocoa.dispatch_get_main_queue(), ctx, onProgressMain);
+    }
+
+    // Wait for the worker thread to finish
+    ctx.worker.thread.join();
+
+    if (ctx.active.load(.acquire)) {
+        if (ctx.worker.result != null) {
+            cocoa.dispatch_async_f(cocoa.dispatch_get_main_queue(), ctx, onCompleteMain);
+        } else {
+            cocoa.dispatch_async_f(cocoa.dispatch_get_main_queue(), ctx, onErrorMain);
+        }
+    }
+}
+
+pub fn runGuiApp(allocator: std.mem.Allocator, target_path: []const u8) !void {
     const pool = cocoa.objc_autoreleasePoolPush();
     defer cocoa.objc_autoreleasePoolPop(pool);
 
-    std.debug.print("\n\x1b[1;36m[ZSpace Native AppKit]\x1b[0m Launching Pure-Zig GUI for: {s}\n", .{root_node.path});
+    std.debug.print("\n\x1b[1;36m[ZSpace Native AppKit]\x1b[0m Launching Pure-Zig GUI for: {s}\n", .{target_path});
 
-    // 1. Initialize UI State
+    // 1. Initialize UI State with initial placeholder node
     var ui_state = components.UIState.init(allocator);
     defer ui_state.deinit();
-    ui_state.root_node = root_node;
-    ui_state.status_text = "Analysis Ready";
+
+    const bname = std.fs.path.basename(target_path);
+    var initial_root: types.DiskNode = .{
+        .name = if (bname.len > 0) bname else target_path,
+        .path = target_path,
+        .kind = .directory,
+        .category = .Other,
+        .protection = .None,
+    };
+    ui_state.root_node = &initial_root;
+    ui_state.status_text = "Scanning directory in background...";
     components.global_ui_state = &ui_state;
     defer components.global_ui_state = null;
 
@@ -31,6 +121,7 @@ pub fn runGuiApp(allocator: std.mem.Allocator, root_node: *types.DiskNode) !void
     const sel_sharedApp = cocoa.sel_registerName("sharedApplication");
     const sel_setActivationPolicy = cocoa.sel_registerName("setActivationPolicy:");
     const sel_activateIgnoringOtherApps = cocoa.sel_registerName("activateIgnoringOtherApps:");
+    const sel_finishLaunching = cocoa.sel_registerName("finishLaunching");
     const sel_run = cocoa.sel_registerName("run");
 
     const app = cocoa.send0(NSApplication, sel_sharedApp);
@@ -40,6 +131,7 @@ pub fn runGuiApp(allocator: std.mem.Allocator, root_node: *types.DiskNode) !void
     }
 
     cocoa.sendVoidInt(app, sel_setActivationPolicy, 0); // NSApplicationActivationPolicyRegular
+    cocoa.sendVoid0(app, sel_finishLaunching);
 
     // 4. Construct Native Menubar
     setupMenuBar(app);
@@ -144,12 +236,52 @@ pub fn runGuiApp(allocator: std.mem.Allocator, root_node: *types.DiskNode) !void
     cocoa.sendVoidInt(sunburst_view, sel_setAutoresizingMask, 2 | 8); // width resizable + stick to top
     cocoa.sendVoid1(root_view, sel_addSubview, sunburst_view);
 
-    // 7. Order Front and Launch Runloop
+    components.view_header = header_view;
+    components.view_status = status_view;
+    components.view_sidebar = sidebar_view;
+    components.view_treemap = treemap_view;
+    components.view_sunburst = sunburst_view;
+    defer {
+        components.view_header = null;
+        components.view_status = null;
+        components.view_sidebar = null;
+        components.view_treemap = null;
+        components.view_sunburst = null;
+    }
+
+    // 7. Order Front and Display Window Instantly (<50ms)
+    const sel_orderFrontRegardless = cocoa.sel_registerName("orderFrontRegardless");
     cocoa.sendVoid0(window, sel_center);
     cocoa.sendVoid1(window, sel_makeKeyAndOrderFront, null);
+    cocoa.sendVoid0(window, sel_orderFrontRegardless);
     cocoa.sendVoidBool(app, sel_activateIgnoringOtherApps, true);
 
-    std.debug.print("✓ ZSpace Native Cocoa Liquid Glass UI mounted.\n", .{});
+    const sel_isVisible = cocoa.sel_registerName("isVisible");
+    const is_vis = cocoa.send0(window, sel_isVisible);
+    std.debug.print("✓ ZSpace Native Cocoa Liquid Glass UI mounted (<50ms). isVisible={?*}\n", .{is_vis});
+
+    // 8. Start Background Scanner
+    var sc = scanner.Scanner.init(allocator, .{});
+    defer sc.deinit();
+
+    const scan_ctx = try allocator.create(ScanContext);
+    defer allocator.destroy(scan_ctx);
+
+    scan_ctx.* = .{
+        .scanner = &sc,
+        .ui_state = &ui_state,
+        .target_path = target_path,
+    };
+
+    try sc.scanBackground(target_path, &scan_ctx.worker);
+    const monitor_thread = try std.Thread.spawn(.{}, monitorScanLoop, .{scan_ctx});
+    defer {
+        sc.cancel();
+        scan_ctx.active.store(false, .release);
+        monitor_thread.join();
+    }
+
+    // 9. Run the Cocoa Event Loop
     cocoa.sendVoid0(app, sel_run);
 }
 

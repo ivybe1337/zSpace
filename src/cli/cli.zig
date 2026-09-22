@@ -1116,11 +1116,7 @@ fn runTuiCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts) !
 
 fn runGuiCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts) !void {
     _ = opts;
-    var sc = scanner.Scanner.init(allocator, .{});
-    defer sc.deinit();
-
-    const root = try sc.scan(path);
-    try gui.runGuiApp(allocator, root);
+    try gui.runGuiApp(allocator, path);
 }
 
 fn runBenchmarkCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts) !void {
