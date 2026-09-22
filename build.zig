@@ -40,4 +40,32 @@ pub fn build(b: *std.Build) void {
     const run_test = b.addRunArtifact(test_exe);
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_test.step);
+
+    // G-13: App Bundle assembly step
+    const bundle_step = b.step("bundle", "Assemble macOS ZSpace.app bundle in zig-out/ZSpace.app");
+    const bundle_cmd = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\mkdir -p zig-out/ZSpace.app/Contents/MacOS zig-out/ZSpace.app/Contents/Resources
+        \\cp zig-out/bin/zspace zig-out/ZSpace.app/Contents/MacOS/ZSpace
+        \\cp dist/ZSpace.app/Contents/Info.plist zig-out/ZSpace.app/Contents/Info.plist
+        \\cp assets/AppIcon.icns zig-out/ZSpace.app/Contents/Resources/AppIcon.icns
+        \\codesign --force --deep --sign - zig-out/ZSpace.app
+    });
+    bundle_cmd.step.dependOn(b.getInstallStep());
+    bundle_step.dependOn(&bundle_cmd.step);
+
+    // Install to ~/Applications and /Applications
+    const install_app_step = b.step("install-app", "Install ZSpace.app into /Applications and ~/Applications");
+    const install_app_cmd = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\mkdir -p /Users/joshua/Applications/ZSpace.app/Contents/MacOS /Users/joshua/Applications/ZSpace.app/Contents/Resources
+        \\cp zig-out/bin/zspace /Users/joshua/Applications/ZSpace.app/Contents/MacOS/ZSpace
+        \\cp dist/ZSpace.app/Contents/Info.plist /Users/joshua/Applications/ZSpace.app/Contents/Info.plist
+        \\cp assets/AppIcon.icns /Users/joshua/Applications/ZSpace.app/Contents/Resources/AppIcon.icns
+        \\codesign --force --deep --sign - /Users/joshua/Applications/ZSpace.app
+        \\cp -R /Users/joshua/Applications/ZSpace.app /Applications/ZSpace.app 2>/dev/null || true
+        \\codesign --force --deep --sign - /Applications/ZSpace.app 2>/dev/null || true
+    });
+    install_app_cmd.step.dependOn(b.getInstallStep());
+    install_app_step.dependOn(&install_app_cmd.step);
 }
