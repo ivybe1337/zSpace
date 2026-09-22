@@ -18,10 +18,9 @@ pub fn build(b: *std.Build) void {
 
     if (target.result.os.tag == .macos) {
         root_mod.linkFramework("Cocoa", .{});
-        root_mod.linkFramework("Metal", .{});
         root_mod.linkFramework("QuartzCore", .{});
         root_mod.linkFramework("CoreGraphics", .{});
-        root_mod.linkFramework("WebKit", .{});
+        root_mod.linkFramework("IOKit", .{});
     }
 
     b.installArtifact(exe);

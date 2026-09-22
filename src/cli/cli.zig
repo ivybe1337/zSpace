@@ -13,6 +13,8 @@ const repl = @import("../repl/repl.zig");
 const tui_select = @import("../core/tui_select.zig");
 const visualizer3d = @import("../gui/visualizer3d.zig");
 const out = @import("../core/out.zig");
+const mcp = @import("../mcp/mcp.zig");
+const json = @import("../core/json.zig");
 
 const c = @cImport({
     @cInclude("stdlib.h");
@@ -244,6 +246,12 @@ pub fn runCli(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         var r = repl.Repl.init(allocator) catch return EXIT_SCAN;
         defer r.deinit();
         r.run(init_p) catch return EXIT_SCAN;
+        return EXIT_OK;
+    }
+
+    if (std.mem.eql(u8, command, "mcp")) {
+        logVerbose(opts, "[zspace] starting stdio MCP server", .{});
+        mcp.runServer(allocator) catch return EXIT_SCAN;
         return EXIT_OK;
     }
 
@@ -531,7 +539,29 @@ fn runUndoCmd(allocator: std.mem.Allocator, receipt: []const u8, opts: GlobalOpt
 }
 
 fn runScanCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts) !void {
-    _ = opts;
+    if (opts.format == .json) {
+        var jbuf: std.ArrayList(u8) = .{ .items = &.{}, .capacity = 0 };
+        defer jbuf.deinit(allocator);
+        var jw = json.JsonWriter{ .list = &jbuf, .allocator = allocator };
+        var sc = scanner.Scanner.init(allocator, .{});
+        defer sc.deinit();
+        const root = try sc.scan(path);
+        try jw.print(
+            "{{\"path\":\"{s}\",\"size_bytes\":{d},\"allocated_bytes\":{d},\"file_count\":{d},\"dir_count\":{d},\"errors\":{d},\"elapsed_ms\":{d:.2}}}",
+            .{
+                path,
+                root.size_bytes,
+                root.allocated_bytes,
+                root.file_count,
+                root.dir_count,
+                sc.telemetry.errors_count,
+                @as(f64, @floatFromInt(sc.telemetry.elapsed_ns)) / 1_000_000.0,
+            },
+        );
+        out.print("{s}\n", .{jbuf.items});
+        return;
+    }
+
     out.print("\x1b[1;36mScanning target:\x1b[0m {s}\n", .{path});
 
     var sc = scanner.Scanner.init(allocator, .{});
