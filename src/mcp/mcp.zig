@@ -257,6 +257,7 @@ const TOOLS_JSON =
     \\{"name":"undo","description":"Restore a trashed item by receipt id and verify its Blake3 digest. DESTRUCTIVE: requires allow_write=true.","inputSchema":{"type":"object","properties":{"receipt":{"type":"string","description":"Receipt id from clean_apply or history."},"allow_write":{"type":"boolean","description":"Must be true or the call is refused."}},"required":["receipt","allow_write"]}},
     \\{"name":"snapshot_save","description":"Write a ZSNP2 snapshot of a tree (per-file Blake3 + mtime) for later diffing.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Directory to snapshot."},"output":{"type":"string","description":"Destination .zsnap file path."}},"required":["path","output"]}},
     \\{"name":"snapshot_diff","description":"Diff two snapshots, reporting added/removed/grew/shrunk paths with byte deltas, largest first. Read-only.","inputSchema":{"type":"object","properties":{"a":{"type":"string","description":"Earlier .zsnap file."},"b":{"type":"string","description":"Later .zsnap file."}},"required":["a","b"]}}
+    \\,{"name":"index_status","description":"Inspect the local optional index cache without creating it.","inputSchema":{"type":"object","properties":{}}}
     \\]}
 ;
 
@@ -300,10 +301,14 @@ fn toolScan(arena: std.mem.Allocator, args: ?std.json.Value, buf: *std.ArrayList
     var w = beginJsonObject(arena, buf);
     try w.writeAll("{");
     try writePathField(&w, "path", root.path);
-    try w.print(",\"total_bytes\":{d},\"allocated_bytes\":{d},\"file_count\":{d},\"dir_count\":{d},\"elapsed_ms\":{d:.2},\"truncated\":{s}",
-        .{ root.size_bytes, root.allocated_bytes, root.file_count, root.dir_count,
+    const status = @tagName(sc.last_status);
+    try w.print(",\"status\":\"{s}\",\"complete\":{s},\"total_bytes\":{d},\"allocated_bytes\":{d},\"file_count\":{d},\"dir_count\":{d},\"errors\":{d},\"elapsed_ms\":{d:.2},\"truncated\":{s}",
+        .{ status,
+            if (sc.last_status == .complete) "true" else "false",
+            root.size_bytes, root.allocated_bytes, root.file_count, root.dir_count,
+            sc.telemetry.errors_count,
             @as(f64, @floatFromInt(t1 - t0)) / 1_000_000.0,
-            if (root.protection.isProtected()) "true" else "false" });
+            if (sc.last_status != .complete) "true" else "false" });
     try w.writeAll(",\"top_files\":[");
     for (largest.items, 0..) |f, i| {
         if (i > 0) try w.writeAll(",");
@@ -346,6 +351,7 @@ fn toolDedup(arena: std.mem.Allocator, args: ?std.json.Value, buf: *std.ArrayLis
     var sc = scanner.Scanner.init(arena, .{});
     defer sc.deinit();
     const root = try sc.scan(path);
+    if (sc.last_status != .complete) return fail("scan was incomplete; duplicate results withheld");
 
     var eng = dedup.DedupEngine.init(arena);
     eng.min_size_bytes = min_size;
@@ -358,7 +364,7 @@ fn toolDedup(arena: std.mem.Allocator, args: ?std.json.Value, buf: *std.ArrayLis
     try w.writeAll("{\"clusters\":[");
     for (clusters.items, 0..) |cl, ci| {
         if (ci > 0) try w.writeAll(",");
-        try w.print("{{\"size_each\":{d},\"wasted_bytes\":{d},\"copies\":{d},\"files\":[", .{ cl.size_each, cl.total_wasted_bytes, cl.items.items.len });
+        try w.print("{{\"size_each\":{d},\"duplicate_candidate_bytes\":{d},\"estimated_recoverable_bytes\":null,\"shared_allocation\":\"unknown\",\"copies\":{d},\"files\":[", .{ cl.size_each, cl.total_wasted_bytes, cl.items.items.len });
         for (cl.items.items, 0..) |it, ii| {
             if (ii > 0) try w.writeAll(",");
             try w.writeAll("{");
@@ -367,7 +373,7 @@ fn toolDedup(arena: std.mem.Allocator, args: ?std.json.Value, buf: *std.ArrayLis
         }
         try w.writeAll("]}");
     }
-    try w.print("],\"cluster_count\":{d},\"total_wasted_bytes\":{d}}}", .{ clusters.items.len, total_wasted });
+    try w.print("],\"cluster_count\":{d},\"duplicate_candidate_bytes\":{d},\"estimated_recoverable_bytes\":null}}", .{ clusters.items.len, total_wasted });
     return ok(w.list.items);
 }
 
@@ -444,6 +450,7 @@ fn toolCleanPropose(arena: std.mem.Allocator, args: ?std.json.Value, buf: *std.A
     var sc = scanner.Scanner.init(arena, .{});
     defer sc.deinit();
     const root = try sc.scan(path);
+    if (sc.last_status != .complete) return fail("scan was incomplete; cleanup proposal withheld");
     const items = try collectCandidates(arena, root, limit);
 
     var total: u64 = 0;
@@ -465,7 +472,7 @@ fn toolCleanPropose(arena: std.mem.Allocator, args: ?std.json.Value, buf: *std.A
             it.size_bytes, it.item_count, if (it.is_quick_win) "true" else "false",
         });
     }
-    try w.print("],\"candidate_count\":{d},\"total_bytes\":{d},\"limit\":{d},\"mutated\":false}}", .{ items.items.len, total, limit });
+    try w.print("],\"candidate_count\":{d},\"candidate_logical_bytes\":{d},\"estimated_recoverable_bytes\":null,\"limit\":{d},\"mutated\":false}}", .{ items.items.len, total, limit });
     return ok(w.list.items);
 }
 
@@ -485,6 +492,7 @@ fn toolCleanApply(arena: std.mem.Allocator, args: ?std.json.Value, buf: *std.Arr
     var sc = scanner.Scanner.init(arena, .{});
     defer sc.deinit();
     const root = try sc.scan(path);
+    if (sc.last_status != .complete) return fail("scan was incomplete; cleanup withheld");
     const items = try collectCandidates(arena, root, limit);
 
     const mask = maskFromSpec(arena, spec, items.items) catch {
@@ -517,7 +525,7 @@ fn toolCleanApply(arena: std.mem.Allocator, args: ?std.json.Value, buf: *std.Arr
         // Re-derive protection independently instead of trusting the proposal
         // list: the agent-facing layer must not be the weakest one.
         const protection = classifier.classifyProtection(it.path);
-        if (protection.isProtected() and protection != .ProjectSource) {
+        if (protection.isProtected()) {
             try arrPushComma(arena, &refused);
             var rw = json.JsonWriter{ .list = &refused, .allocator = arena };
             try rw.print("{{\"id\":{d},", .{it.id});
@@ -568,7 +576,7 @@ fn toolCleanApply(arena: std.mem.Allocator, args: ?std.json.Value, buf: *std.Arr
     try w.writeAll(applied.items);
     try w.writeAll("],\"refused\":[");
     try w.writeAll(refused.items);
-    try w.print("],\"applied_count\":{d},\"refused_count\":{d},\"freed_bytes\":{d},\"dry_run\":{s},\"undo_hint\":\"undo accepts any returned receipt\"}}", .{
+    try w.print("],\"applied_count\":{d},\"refused_count\":{d},\"selected_logical_bytes\":{d},\"measured_freed_bytes\":null,\"dry_run\":{s},\"undo_hint\":\"undo accepts any returned receipt\"}}", .{
         applied_n, refused_n, freed, if (dry_run) "true" else "false",
     });
     return ok(w.list.items);
@@ -841,9 +849,7 @@ pub fn runServer(allocator: std.mem.Allocator) !void {
             var list_resp: std.ArrayList(u8) = .{ .items = &.{}, .capacity = 0 };
             defer list_resp.deinit(arena);
             var lw = json.JsonWriter{ .list = &list_resp, .allocator = arena };
-            try lw.writeAll("{\"tools\":");
-            try lw.writeAll(TOOLS_MANIFEST);
-            try lw.writeAll("}");
+            try lw.writeAll(TOOLS_JSON);
             sendResult(allocator, &out_buf, id_val, list_resp.items);
         } else if (std.mem.eql(u8, method, "tools/call")) {
             const tool_name = argString(params, "name") orelse {
@@ -882,4 +888,3 @@ pub fn runServer(allocator: std.mem.Allocator) !void {
         }
     }
 }
-

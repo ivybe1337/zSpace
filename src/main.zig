@@ -67,6 +67,7 @@ fn makeHermeticFixture(allocator: std.mem.Allocator) !HermeticFixture {
     try tmp.dir.createDirPath(tio, "hermetic/git-guard/.git/refs/heads");
     try tmp.dir.createDirPath(tio, "hermetic/git-guard/src");
     try tmp.dir.createDirPath(tio, "hermetic/deep/nest");
+    try tmp.dir.writeFile(tio, .{ .sub_path = "hermetic/weird|name.txt", .data = "delimiter-safe snapshot path\n" });
 
     // Deep nest lvl01..lvl50 + bottom.txt.
     var nest_path: [512]u8 = undefined;
@@ -184,6 +185,7 @@ test "scanner traversal and block calculation" {
     defer sc.deinit();
 
     const root = try sc.scan(fixture.root_path);
+    try std.testing.expectEqual(scanner.ScanStatus.complete, sc.last_status);
     // hermetic-root: bottom.txt(10) + main.c(25) + notes.txt(15) +
     //   dup-a/dup-b/unique(8192+8192+9000) + empty.txt(0) + HEAD(23) + main(0)
     try std.testing.expect(root.size_bytes > 0);
@@ -209,6 +211,69 @@ test "scanner traversal and block calculation" {
 
     // symlink loop + fifo never hang, never inflate counts
     try std.testing.expectEqual(@as(u64, 0), sc.telemetry.errors_count);
+    const zero_byte = findChild(root, "zero-byte").?;
+    const fifo = findChild(zero_byte, "myfifo").?;
+    try std.testing.expectEqual(types.FileKind.fifo, fifo.kind);
+}
+
+test "scanner rejects a nonexistent root instead of returning an empty success" {
+    var sc = scanner.Scanner.init(std.testing.allocator, .{});
+    defer sc.deinit();
+    try std.testing.expectError(error.InvalidScanRoot, sc.scan("/tmp/zspace-missing-scan-root-54e5d3"));
+    try std.testing.expectEqual(scanner.ScanStatus.failed, sc.last_status);
+}
+
+test "snapshot save round-trips and rejects a truncated file" {
+    const allocator = std.testing.allocator;
+    var fixture = try makeHermeticFixture(allocator);
+    defer fixture.cleanup(allocator);
+
+    var sc = scanner.Scanner.init(allocator, .{});
+    defer sc.deinit();
+    const root = try sc.scan(fixture.root_path);
+    try std.testing.expectEqual(scanner.ScanStatus.complete, sc.last_status);
+    var engine = snapshot.SnapshotEngine.init(allocator);
+
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base_len = try fixture.tmp.dir.realPath(std.testing.io, &base_buf);
+    const base = base_buf[0..base_len];
+    const snapshot_path = try std.fmt.allocPrint(allocator, "{s}/roundtrip.zsnap", .{base});
+    defer allocator.free(snapshot_path);
+    try engine.saveSnapshot(root, snapshot_path);
+
+    var loaded = try engine.loadSnapshot(snapshot_path);
+    defer engine.freeSnapshot(&loaded);
+    try std.testing.expectEqual(@as(u8, 3), loaded.version);
+    try std.testing.expect(loaded.complete);
+    try std.testing.expect(loaded.entries.count() > 1);
+    var base_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fixture_root_len = try fixture.tmp.dir.realPath(std.testing.io, &base_path_buf);
+    const special_path = try std.fmt.allocPrint(allocator, "{s}/hermetic/weird|name.txt", .{base_path_buf[0..fixture_root_len]});
+    defer allocator.free(special_path);
+    try std.testing.expect(loaded.entries.contains(special_path));
+
+    const changed_snapshot = try std.fmt.allocPrint(allocator, "{s}/changed.zsnap", .{base});
+    defer allocator.free(changed_snapshot);
+    try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "hermetic/weird|name.txt", .data = "changed content, same length\n" });
+    const root_after_change = try sc.scan(fixture.root_path);
+    try engine.saveSnapshot(root_after_change, changed_snapshot);
+    var diffs = try engine.compareSnapshots(snapshot_path, changed_snapshot);
+    defer {
+        for (diffs.items) |diff| allocator.free(diff.path);
+        diffs.deinit(allocator);
+    }
+    var saw_content_change = false;
+    for (diffs.items) |diff| {
+        if (std.mem.eql(u8, diff.path, special_path)) {
+            saw_content_change = diff.status == .changed and diff.diff_bytes == 0;
+        }
+    }
+    try std.testing.expect(saw_content_change);
+
+    try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "truncated.zsnap", .data = "# ZSNP3\nversion=3\n" });
+    const truncated = try std.fmt.allocPrint(allocator, "{s}/truncated.zsnap", .{base});
+    defer allocator.free(truncated);
+    try std.testing.expectError(error.InvalidSnapshot, engine.loadSnapshot(truncated));
 }
 
 test "deduplication engine cluster grouping" {
@@ -342,9 +407,11 @@ test "3d isometric projection model" {
 test "classifier and protection classes" {
     const prot_sys = classifier.classifyProtection("/System/Library/CoreServices");
     try std.testing.expectEqual(types.ProtectionClass.SystemOS, prot_sys);
+    try std.testing.expectEqual(types.ProtectionClass.None, classifier.classifyProtection("/tmp/my-SystemBackup/file"));
 
     const prot_git = classifier.classifyProtection("/my/repo/.git");
     try std.testing.expectEqual(types.ProtectionClass.GitRepository, prot_git);
+    try std.testing.expectEqual(types.ProtectionClass.None, classifier.classifyProtection("/my/repo/.gitlab"));
 
     const cat_zig = classifier.classifyCategory("main.zig", false);
     try std.testing.expectEqual(types.CategoryTag.Code_Dev, cat_zig);
@@ -394,8 +461,12 @@ test "C04 trash + journal + undo receipt (hermetic)" {
 
     const op = try cl.safeMoveToTrash(victim_abs, 11, .None);
     try std.testing.expectEqualStrings(victim_abs, op.original_path);
-    try std.testing.expect(op.receipt_id.len == 16);
+    try std.testing.expect(op.receipt_id.len == 32);
     try std.testing.expect(op.verified_hash != 0);
+    const journal_bytes = try cleaner.readWholeFileLibc(allocator, journal_path, 1 << 20);
+    defer allocator.free(journal_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, journal_bytes, "\"phase\":\"intent\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, journal_bytes, "\"phase\":\"outcome\"") != null);
 
     // Source gone from place.
     {

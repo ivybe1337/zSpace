@@ -32,6 +32,13 @@ pub const ScanProgress = struct {
     cancelled: bool = false,
 };
 
+pub const ScanStatus = enum {
+    complete,
+    partial,
+    cancelled,
+    failed,
+};
+
 pub const Scanner = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
@@ -44,6 +51,7 @@ pub const Scanner = struct {
     is_scanning: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     cancel_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     visited_inodes: std.AutoHashMap(InodeKey, void),
+    last_status: ScanStatus = .failed,
 
     pub fn init(allocator: std.mem.Allocator, config: ScannerConfig) Scanner {
         return .{
@@ -97,12 +105,34 @@ pub const Scanner = struct {
     }
 
     pub fn scan(self: *Scanner, root_path: []const u8) !*types.DiskNode {
+        // A Scanner owns one result tree at a time. Release the previous tree
+        // before allocating the next one so repeated scans cannot grow forever.
+        _ = self.arena.reset(.free_all);
         self.is_scanning.store(true, .release);
         self.cancel_requested.store(false, .release);
         self.visited_inodes.clearRetainingCapacity();
+        self.files_atomic.store(0, .release);
+        self.dirs_atomic.store(0, .release);
+        self.bytes_atomic.store(0, .release);
+        self.errors_atomic.store(0, .release);
         defer self.is_scanning.store(false, .release);
 
         const start_ns = types.getMonotonicNs();
+
+        var root_z: [4096]u8 = undefined;
+        if (root_path.len == 0 or root_path.len >= root_z.len - 1) {
+            self.last_status = .failed;
+            return error.InvalidScanRoot;
+        }
+        @memcpy(root_z[0..root_path.len], root_path);
+        root_z[root_path.len] = 0;
+        var root_stat: c.struct_stat = undefined;
+        if (c.lstat(&root_z, &root_stat) != 0 or
+            (@as(c_uint, @intCast(root_stat.st_mode)) & 0o170000) != 0o040000)
+        {
+            self.last_status = .failed;
+            return error.InvalidScanRoot;
+        }
 
         const arena_alloc = self.arena.allocator();
         const root_clean = try arena_alloc.dupe(u8, root_path);
@@ -117,15 +147,7 @@ pub const Scanner = struct {
             .protection = classifier.classifyProtection(root_clean),
         };
 
-        var root_z: [4096]u8 = undefined;
-        if (root_clean.len < root_z.len - 1) {
-            @memcpy(root_z[0..root_clean.len], root_clean);
-            root_z[root_clean.len] = 0;
-            var st: c.struct_stat = undefined;
-            if (c.stat(&root_z, &st) == 0) {
-                try self.visited_inodes.put(.{ .dev = @intCast(st.st_dev), .ino = @intCast(st.st_ino) }, {});
-            }
-        }
+        try self.visited_inodes.put(.{ .dev = @intCast(root_stat.st_dev), .ino = @intCast(root_stat.st_ino) }, {});
 
         try self.scanDirectory(root_node);
 
@@ -136,6 +158,12 @@ pub const Scanner = struct {
         self.telemetry.total_files = root_node.file_count;
         self.telemetry.total_dirs = root_node.dir_count;
         self.telemetry.errors_count = self.errors_atomic.load(.acquire);
+        self.last_status = if (self.cancel_requested.load(.acquire))
+            .cancelled
+        else if (self.telemetry.errors_count > 0)
+            .partial
+        else
+            .complete;
 
         return root_node;
     }
@@ -144,7 +172,10 @@ pub const Scanner = struct {
         if (self.cancel_requested.load(.acquire)) return;
 
         var path_z_buf: [4096]u8 = undefined;
-        if (node.path.len >= path_z_buf.len - 1) return;
+        if (node.path.len >= path_z_buf.len - 1) {
+            _ = self.errors_atomic.fetchAdd(1, .monotonic);
+            return;
+        }
         @memcpy(path_z_buf[0..node.path.len], node.path);
         path_z_buf[node.path.len] = 0;
 
@@ -180,7 +211,12 @@ pub const Scanner = struct {
             };
 
             var child_z_buf: [4096]u8 = undefined;
-            if (child_path.len >= child_z_buf.len - 1) continue;
+            if (child_path.len >= child_z_buf.len - 1) {
+                _ = self.errors_atomic.fetchAdd(1, .monotonic);
+                child_node.kind = .unknown;
+                try children_list.append(arena_alloc, child_node);
+                continue;
+            }
             @memcpy(child_z_buf[0..child_path.len], child_path);
             child_z_buf[child_path.len] = 0;
 
@@ -192,8 +228,8 @@ pub const Scanner = struct {
 
             if (stat_res == 0) {
                 const mode: c_uint = @intCast(st.st_mode);
-                const is_dir = (mode & 0o170000) == 0o040000;
-                const is_sym = (mode & 0o170000) == 0o120000;
+                const kind = types.FileKind.fromMode(mode);
+                const is_dir = kind == .directory;
 
                 child_node.category = classifier.classifyCategory(child_path, is_dir);
                 child_node.mtime_ns = @as(i128, st.st_mtimespec.tv_sec) * 1_000_000_000 + st.st_mtimespec.tv_nsec;
@@ -212,7 +248,7 @@ pub const Scanner = struct {
                         node.dir_count += child_node.dir_count + 1;
                         node.item_count += child_node.item_count + 1;
                     }
-                } else if (!is_sym) {
+                } else if (kind == .file) {
                     child_node.kind = .file;
                     child_node.size_bytes = @intCast(st.st_size);
                     child_node.allocated_bytes = if (self.config.compute_allocated_blocks)
@@ -228,7 +264,8 @@ pub const Scanner = struct {
                     node.file_count += 1;
                     node.item_count += 1;
                 } else {
-                    child_node.kind = .symlink;
+                    child_node.kind = kind;
+                    node.item_count += 1;
                 }
             } else {
                 _ = self.errors_atomic.fetchAdd(1, .monotonic);

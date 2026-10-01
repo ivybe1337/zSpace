@@ -4,39 +4,53 @@ const CategoryTag = types.CategoryTag;
 const ProtectionClass = types.ProtectionClass;
 
 pub fn classifyProtection(path: []const u8) ProtectionClass {
-    if (std.mem.startsWith(u8, path, "/System") or
-        std.mem.startsWith(u8, path, "/usr") or
-        std.mem.startsWith(u8, path, "/bin") or
-        std.mem.startsWith(u8, path, "/sbin") or
-        std.mem.startsWith(u8, path, "/private") or
-        std.mem.startsWith(u8, path, "/Library/Preferences") or
-        std.mem.startsWith(u8, path, "/Library/Keychains"))
+    if (pathAtOrBelow(path, "/System") or
+        pathAtOrBelow(path, "/usr") or
+        pathAtOrBelow(path, "/bin") or
+        pathAtOrBelow(path, "/sbin") or
+        pathAtOrBelow(path, "/Library/Preferences") or
+        pathAtOrBelow(path, "/Library/Keychains") or
+        pathAtOrBelow(path, "/private/var/vm") or
+        std.mem.startsWith(u8, path, "/System/Volumes/"))
     {
         return .SystemOS;
     }
 
-    if (std.mem.indexOf(u8, path, "/.git") != null or std.mem.endsWith(u8, path, "/.git")) {
+    if (hasPathComponent(path, ".git")) {
         return .GitRepository;
     }
 
-    if (std.mem.indexOf(u8, path, "/.ssh") != null or
-        std.mem.indexOf(u8, path, "/.gnupg") != null or
-        std.mem.indexOf(u8, path, "/.aws") != null or
-        std.mem.indexOf(u8, path, "/.config") != null)
+    if (hasPathComponent(path, ".ssh") or
+        hasPathComponent(path, ".gnupg") or
+        hasPathComponent(path, ".aws") or
+        hasPathComponent(path, ".config"))
     {
         return .CriticalConfig;
     }
 
-    if (std.mem.indexOf(u8, path, "/src/") != null or
-        std.mem.indexOf(u8, path, "/Sources/") != null or
-        std.mem.indexOf(u8, path, "/tests/") != null or
-        std.mem.indexOf(u8, path, "/Tests/") != null or
-        std.mem.indexOf(u8, path, "/docs/") != null)
+    if (hasPathComponent(path, "src") or
+        hasPathComponent(path, "Sources") or
+        hasPathComponent(path, "tests") or
+        hasPathComponent(path, "Tests") or
+        hasPathComponent(path, "docs"))
     {
         return .ProjectSource;
     }
 
     return .None;
+}
+
+fn pathAtOrBelow(path: []const u8, prefix: []const u8) bool {
+    return std.mem.eql(u8, path, prefix) or
+        (std.mem.startsWith(u8, path, prefix) and path.len > prefix.len and path[prefix.len] == '/');
+}
+
+fn hasPathComponent(path: []const u8, wanted: []const u8) bool {
+    var it = std.mem.tokenizeScalar(u8, path, '/');
+    while (it.next()) |component| {
+        if (std.mem.eql(u8, component, wanted)) return true;
+    }
+    return false;
 }
 
 pub fn classifyCategory(path: []const u8, is_dir: bool) CategoryTag {

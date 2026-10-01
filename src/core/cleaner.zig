@@ -1,6 +1,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const apfs = @import("apfs.zig");
+const classifier = @import("classifier.zig");
 
 const c = @cImport({
     @cInclude("stdio.h");
@@ -12,6 +13,7 @@ const c = @cImport({
     @cInclude("string.h");
     @cInclude("dirent.h");
     @cInclude("sys/stat.h");
+    @cInclude("sys/file.h");
 });
 
 pub const CleanerError = error{
@@ -59,6 +61,7 @@ fn msgSendFSR(url: ObjCId, sel: ObjCSel) [*:0]const u8 {
 extern "c" fn objc_autoreleasePoolPush() ?*anyopaque;
 extern "c" fn objc_autoreleasePoolPop(p: ?*anyopaque) void;
 extern "c" fn __error() *c_int;
+extern "c" fn arc4random_buf(buf: [*]u8, n: usize) void;
 fn getErrno() c_int {
     return __error().*;
 }
@@ -167,7 +170,7 @@ fn ensureParentDir(path: []const u8) void {
         if (i == dir.len or buf[i] == '/') {
             const save = buf[i];
             buf[i] = 0;
-            _ = c.mkdir(@as([*:0]const u8, @ptrCast(&buf)), 0o755);
+            _ = c.mkdir(@as([*:0]const u8, @ptrCast(&buf)), 0o700);
             buf[i] = save;
         }
     }
@@ -178,13 +181,30 @@ fn appendLineToFile(path: []const u8, bytes: []const u8) !void {
     if (path.len >= pb.len - 1) return CleanerError.PathTooLong;
     @memcpy(pb[0..path.len], path);
     pb[path.len] = 0;
-    const f = c.fopen(@as([*:0]const u8, @ptrCast(&pb)), "a");
-    if (f == null) return CleanerError.JournalWriteFailed;
-    defer _ = c.fclose(f);
-    if (bytes.len > 0) {
-        const n = c.fwrite(bytes.ptr, 1, bytes.len, f);
-        if (n != bytes.len) return CleanerError.JournalWriteFailed;
+    const fd = c.open(@as([*:0]const u8, @ptrCast(&pb)), c.O_WRONLY | c.O_APPEND | c.O_CREAT, @as(c_uint, 0o600));
+    if (fd < 0) return CleanerError.JournalWriteFailed;
+    var close_needed = true;
+    defer {
+        if (close_needed) _ = c.close(fd);
     }
+    if (c.flock(fd, c.LOCK_EX) != 0) return CleanerError.JournalWriteFailed;
+    defer _ = c.flock(fd, c.LOCK_UN);
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const n = c.write(fd, bytes.ptr + offset, bytes.len - offset);
+        if (n < 0) {
+            if (getErrno() == c.EINTR) continue;
+            return CleanerError.JournalWriteFailed;
+        }
+        if (n == 0) return CleanerError.JournalWriteFailed;
+        offset += @intCast(n);
+    }
+    if (c.fsync(fd) != 0) return CleanerError.JournalWriteFailed;
+    if (c.close(fd) != 0) {
+        close_needed = false;
+        return CleanerError.JournalWriteFailed;
+    }
+    close_needed = false;
 }
 
 fn jsonEscapeInto(list: *std.ArrayList(u8), allocator: std.mem.Allocator, raw: []const u8) !void {
@@ -526,21 +546,47 @@ pub const Cleaner = struct {
     }
 
     pub fn safeMoveToTrash(self: *Cleaner, target_path: []const u8, size_bytes: u64, protection: types.ProtectionClass) !types.CleanOperation {
-        if (protection.isProtected() and protection != .ProjectSource) {
-            return CleanerError.ProtectedPath;
-        }
+        // The caller's classification is advisory. Re-evaluate at the write
+        // boundary so a forged `.None` cannot bypass the central policy.
+        if (protection.isProtected() or classifier.classifyProtection(target_path).isProtected()) return CleanerError.ProtectedPath;
         var tz: [4096]u8 = undefined;
         if (target_path.len >= tz.len - 1) return CleanerError.PathTooLong;
         @memcpy(tz[0..target_path.len], target_path);
         tz[target_path.len] = 0;
         var lst0: c.struct_stat = undefined;
         if (c.lstat(@as([*:0]const u8, @ptrCast(&tz)), &lst0) != 0) return CleanerError.ItemNotFound;
+        if (classifier.classifyProtection(target_path).isProtected()) return CleanerError.ProtectedPath;
         const is_dir0 = (@as(c_uint, @intCast(lst0.st_mode)) & 0o170000) == 0o040000;
         const digest = computeBlake3IfRegular(target_path);
         const now = types.getRealtimeNs();
+
+        // Receipt identity is independent from the content digest. Write the
+        // intent durably before asking macOS to move anything.
+        var random_receipt: [16]u8 = undefined;
+        arc4random_buf(&random_receipt, random_receipt.len);
+        var receipt_hex: [32]u8 = undefined;
+        const hex = "0123456789abcdef";
+        for (random_receipt, 0..) |b, i| {
+            receipt_hex[i * 2] = hex[b >> 4];
+            receipt_hex[i * 2 + 1] = hex[b & 0x0f];
+        }
+        const rid = try self.allocator.dupe(u8, &receipt_hex);
+        errdefer self.allocator.free(rid);
+        try self.persistTrashIntent(rid, target_path, &lst0, size_bytes, now);
+
         var method: types.TrashMethod = .nsfilemanager;
         var owned_trash: ?[]u8 = null;
         if (comptime @import("builtin").os.tag == .macos) {
+            // Confirm the same filesystem object still occupies the path
+            // immediately before passing it to NSFileManager.
+            var current: c.struct_stat = undefined;
+            if (c.lstat(@as([*:0]const u8, @ptrCast(&tz)), &current) != 0 or
+                current.st_dev != lst0.st_dev or current.st_ino != lst0.st_ino or
+                current.st_mode != lst0.st_mode)
+            {
+                return CleanerError.ItemNotFound;
+            }
+            if (classifier.classifyProtection(target_path).isProtected()) return CleanerError.ProtectedPath;
             if (haveObjC()) {
                 const pool = objc_autoreleasePoolPush();
                 const url = makeFileURL(target_path, is_dir0);
@@ -554,84 +600,11 @@ pub const Cleaner = struct {
                 objc_autoreleasePoolPop(pool);
             }
         }
-        if (owned_trash == null) {
-            const base = std.fs.path.basename(target_path);
-            var ub: [512]u8 = undefined;
-            const un = try std.fmt.bufPrint(&ub, "{s}_{d}", .{ base, now });
-            const dest = try std.fs.path.join(self.allocator, &.{ self.trash_dir_path, un });
-            errdefer self.allocator.free(dest);
-            var sz2: [4096]u8 = undefined;
-            var dz2: [4096]u8 = undefined;
-            @memcpy(sz2[0..target_path.len], target_path);
-            sz2[target_path.len] = 0;
-            @memcpy(dz2[0..dest.len], dest);
-            dz2[dest.len] = 0;
-            if (c.rename(@as([*:0]const u8, @ptrCast(&sz2)), @as([*:0]const u8, @ptrCast(&dz2))) == 0) {
-                owned_trash = dest;
-                method = .rename_same_volume;
-            } else {
-                const en = getErrno();
-                if (en == c.ENOENT) {
-                    self.allocator.free(dest);
-                    return CleanerError.ItemNotFound;
-                }
-                if (en == c.EACCES or en == c.EPERM) {
-                    self.allocator.free(dest);
-                    return CleanerError.PermissionDenied;
-                }
-                copyRecursive(target_path, dest) catch {
-                    self.allocator.free(dest);
-                    return CleanerError.TrashFailed;
-                };
-                if ((@as(c_uint, @intCast(lst0.st_mode)) & 0o170000) == 0o100000) {
-                    const dd = computeBlake3IfRegular(dest);
-                    if (!std.mem.eql(u8, &digest, &dd)) {
-                        removeRecursive(dest);
-                        self.allocator.free(dest);
-                        return CleanerError.TrashFailed;
-                    }
-                }
-                removeRecursive(target_path);
-                var chk: [4096]u8 = undefined;
-                @memcpy(chk[0..target_path.len], target_path);
-                chk[target_path.len] = 0;
-                var chs: c.struct_stat = undefined;
-                if (c.lstat(@as([*:0]const u8, @ptrCast(&chk)), &chs) == 0) {
-                    removeRecursive(dest);
-                    self.allocator.free(dest);
-                    return CleanerError.TrashFailed;
-                }
-                owned_trash = dest;
-                method = .copy_unlink_fallback;
-            }
-        }
+        // Never silently replace a failed native Trash operation with a
+        // rename, copy/unlink, or permanent deletion.
+        if (owned_trash == null) return CleanerError.TrashFailed;
         const tpath = owned_trash orelse return CleanerError.TrashFailed;
         errdefer self.allocator.free(tpath);
-        var rsrc: [32]u8 = digest;
-        const tsu: u64 = @bitCast(@as(i64, @truncate(now)));
-        var tb: [8]u8 = undefined;
-        std.mem.writeInt(u64, &tb, tsu, .little);
-        for (tb, 0..) |b, i| rsrc[i % rsrc.len] ^= b;
-        var allz = true;
-        for (digest) |b| {
-            if (b != 0) {
-                allz = false;
-                break;
-            }
-        }
-        if (allz) {
-            const seed: u64 = @as(u64, @bitCast(types.getMonotonicNs())) ^ tsu ^ 0x9e3779b97f4a7c15;
-            var prng = std.Random.DefaultPrng.init(seed);
-            prng.random().bytes(&rsrc);
-        }
-        var rbuf: [16]u8 = undefined;
-        const hx = "0123456789abcdef";
-        for (0..8) |i| {
-            rbuf[i * 2] = hx[rsrc[i] >> 4];
-            rbuf[i * 2 + 1] = hx[rsrc[i] & 0x0f];
-        }
-        const rid = try self.allocator.dupe(u8, rbuf[0..]);
-        errdefer self.allocator.free(rid);
         const op = types.CleanOperation{
             .original_path = try self.allocator.dupe(u8, target_path),
             .trash_path = tpath,
@@ -643,11 +616,26 @@ pub const Cleaner = struct {
             .method = method,
         };
         try self.journal.append(self.allocator, op);
-        self.persistJournalLine(&self.journal.items[self.journal.items.len - 1]) catch |e| switch (e) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => {},
-        };
+        try self.persistJournalLine(&self.journal.items[self.journal.items.len - 1]);
         return self.journal.items[self.journal.items.len - 1];
+    }
+
+    fn persistTrashIntent(self: *Cleaner, receipt: []const u8, path: []const u8, st: *const c.struct_stat, size: u64, ts: i128) !void {
+        const jp = try journalFilePath(self.allocator);
+        defer self.allocator.free(jp);
+        ensureParentDir(jp);
+        var line: std.ArrayList(u8) = .{ .items = &.{}, .capacity = 0 };
+        defer line.deinit(self.allocator);
+        try line.appendSlice(self.allocator, "{\"schema_version\":1,\"op\":\"trash_intent\",\"phase\":\"intent\",\"receipt\":");
+        try jsonEscapeInto(&line, self.allocator, receipt);
+        try line.appendSlice(self.allocator, ",\"src\":");
+        try jsonEscapeInto(&line, self.allocator, path);
+        var nb: [256]u8 = undefined;
+        const suffix = try std.fmt.bufPrint(&nb, ",\"dev\":{d},\"ino\":{d},\"size\":{d},\"ts\":{d}}}\n", .{
+            @as(u64, @intCast(st.st_dev)), @as(u64, @intCast(st.st_ino)), size, ts,
+        });
+        try line.appendSlice(self.allocator, suffix);
+        try appendLineToFile(jp, line.items);
     }
 
     pub fn persistJournalLine(self: *Cleaner, op: *const types.CleanOperation) !void {
@@ -658,7 +646,7 @@ pub const Cleaner = struct {
         defer line.deinit(self.allocator);
         var hexb: [64]u8 = undefined;
         const hx = blake3Hex(op.blake3, &hexb);
-        try line.appendSlice(self.allocator, "{\"op\":\"trash\",\"receipt\":");
+        try line.appendSlice(self.allocator, "{\"schema_version\":1,\"op\":\"trash\",\"phase\":\"outcome\",\"outcome\":\"succeeded\",\"receipt\":");
         try jsonEscapeInto(&line, self.allocator, op.receipt_id);
         try line.appendSlice(self.allocator, ",\"src\":");
         try jsonEscapeInto(&line, self.allocator, op.original_path);

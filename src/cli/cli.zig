@@ -34,6 +34,7 @@ pub const OutputFormat = enum { table, json };
 pub const GlobalOpts = struct {
     format: OutputFormat = .table,
     dry_run: bool = false,
+    confirm: bool = false,
     verbose: bool = false,
     min_size: u64 = 0,
     interactive: bool = false,
@@ -134,6 +135,8 @@ fn parseCliArgs(allocator: std.mem.Allocator, raw: []const []const u8) !ParsedAr
             }
         } else if (std.mem.eql(u8, arg, "--dry-run")) {
             opts.dry_run = true;
+        } else if (std.mem.eql(u8, arg, "--yes") or std.mem.eql(u8, arg, "--confirm")) {
+            opts.confirm = true;
         } else if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
             opts.verbose = true;
         } else if (std.mem.eql(u8, arg, "--interactive") or std.mem.eql(u8, arg, "-i")) {
@@ -221,6 +224,11 @@ pub fn runCli(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     if (isVersionArg(command)) {
         printVersion(opts);
         return EXIT_OK;
+    }
+    if ((std.mem.eql(u8, command, "clean") or std.mem.eql(u8, command, "wins") or std.mem.eql(u8, command, "quick-wins")) and
+        opts.select.len > 0 and !opts.dry_run and !opts.confirm)
+    {
+        return usageError("--select can move items to Trash; review the candidates, then repeat with --yes (or use --dry-run)", .{});
     }
     // `zspace <path> --help`-style: command slot holds a path; real command unknown.
     // Fall through to unknown-command handling below which prints per-command help hint.
@@ -364,15 +372,15 @@ pub fn runCli(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
 fn printHelp() void {
     out.printRaw(
         \\================================================================================
-        \\  ZSPACE  —  Ultra-Fast Pure Zig Disk & Spacetime Management Suite
+        \\  ZSPACE  —  Native Storage Explorer
         \\================================================================================
         \\
         \\USAGE:
         \\  zspace <command> [path] [options]
         \\
         \\CLEANUP & ANALYSIS:
-        \\  clean <path>         Analyze and show smart cleanup recommendations & danger risks
-        \\  wins <path>          Show quick-win safe storage reclaimables (>100MB caches)
+        \\  clean <path>         Analyze cleanup suggestions with risk labels
+        \\  wins <path>          Show cleanup suggestions and candidate logical bytes
         \\  npkill <path>        Sweep for heavy build artifacts (node_modules, target, .venv)
         \\  dedup <path>         Find duplicate files using 3-stage sparse & streaming hash
         \\  decay <path>         Analyze temporal file age & dormant iceberg storage
@@ -394,6 +402,7 @@ fn printHelp() void {
         \\GLOBAL OPTIONS (may appear before or after the command):
         \\  --format=json|table  Machine-readable JSON or human table (default: table)
         \\  --dry-run            Preview only; mutate nothing (clean/dedup report only)
+        \\  --yes, --confirm      Confirm the exact --select cleanup set before moving it to Trash
         \\  --verbose, -v        Verbose diagnostics to stderr
         \\  --interactive, -i   Checkbox TUI to pick items (clean)
         \\  --select=<spec>     Numbered selection: 34,12 / 3-7 / all / safe (clean)
@@ -471,19 +480,29 @@ fn runSnapshotCmd(allocator: std.mem.Allocator, positionals: []const []const u8,
             if (std.mem.eql(u8, p, "--format=json")) break true;
         } else false;
         if (as_json) {
-            out.printRaw("{\"diffs\":[");
+            var jbuf: std.ArrayList(u8) = .{ .items = &.{}, .capacity = 0 };
+            defer jbuf.deinit(allocator);
+            var jw = json.JsonWriter{ .list = &jbuf, .allocator = allocator };
+            try jw.writeAll("{\"schema_version\":1,\"status\":\"complete\",\"complete\":true,\"data\":{\"diffs\":[");
             for (diffs.items, 0..) |d, idx| {
-                if (idx > 0) out.printRaw(",");
+                if (idx > 0) try jw.writeByte(',');
                 const st = switch (d.status) {
                     .added => "added",
                     .removed => "removed",
                     .grew => "grew",
                     .shrunk => "shrunk",
+                    .changed => "same_size_content_changed",
+                    .unknown => "unknown",
                     .unchanged => "unchanged",
                 };
-                out.print("{{\"path\":\"{s}\",\"status\":\"{s}\",\"old\":{d},\"new\":{d},\"diff\":{d}}}", .{ d.path, st, d.old_size, d.new_size, d.diff_bytes });
+                try jw.writeAll("{\"path\":");
+                try json.writeJsonEscaped(d.path, &jw);
+                try jw.writeAll(",\"status\":");
+                try json.writeJsonEscaped(st, &jw);
+                try jw.print(",\"old\":{d},\"new\":{d},\"diff\":{d}}}", .{ d.old_size, d.new_size, d.diff_bytes });
             }
-            out.printRaw("]}\n");
+            try jw.writeAll("]},\"errors\":[]}\n");
+            out.printRaw(jbuf.items);
         } else {
             if (diffs.items.len == 0) {
                 out.printRaw("No differences.\n");
@@ -495,6 +514,8 @@ fn runSnapshotCmd(allocator: std.mem.Allocator, positionals: []const []const u8,
                     .removed => "REMOVED",
                     .grew => "GREW   ",
                     .shrunk => "SHRUNK ",
+                    .changed => "CHANGED",
+                    .unknown => "UNKNOWN",
                     .unchanged => "SAME   ",
                 };
                 out.print("{s} {s} ({d} -> {d})\n", .{ tag, d.path, d.old_size, d.new_size });
@@ -546,19 +567,23 @@ fn runScanCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts) 
         var sc = scanner.Scanner.init(allocator, .{});
         defer sc.deinit();
         const root = try sc.scan(path);
-        try jw.print(
-            "{{\"path\":\"{s}\",\"size_bytes\":{d},\"allocated_bytes\":{d},\"file_count\":{d},\"dir_count\":{d},\"errors\":{d},\"elapsed_ms\":{d:.2}}}",
-            .{
-                path,
-                root.size_bytes,
-                root.allocated_bytes,
-                root.file_count,
-                root.dir_count,
-                sc.telemetry.errors_count,
-                @as(f64, @floatFromInt(sc.telemetry.elapsed_ns)) / 1_000_000.0,
-            },
-        );
+        const status = switch (sc.last_status) { .complete => "complete", .partial => "partial", .cancelled => "cancelled", .failed => "failed" };
+        try jw.writeAll("{\"schema_version\":1,\"status\":");
+        try json.writeJsonEscaped(status, &jw);
+        try jw.print(",\"complete\":{s},\"data\":{{\"path\":", .{if (sc.last_status == .complete) "true" else "false"});
+        try json.writeJsonEscaped(path, &jw);
+        try jw.print(",\"logical_bytes\":{d},\"reported_allocated_bytes\":{d},\"file_count\":{d},\"directory_count\":{d},\"error_count\":{d},\"logical_bytes_indexed_per_sec\":{d:.2},\"items_per_sec\":{d:.2},\"elapsed_ms\":{d:.2}}},\"errors\":[]}}", .{
+            root.size_bytes,
+            root.allocated_bytes,
+            root.file_count,
+            root.dir_count,
+            sc.telemetry.errors_count,
+            sc.telemetry.throughputBytesPerSec(),
+            sc.telemetry.throughputFilesPerSec(),
+            @as(f64, @floatFromInt(sc.telemetry.elapsed_ns)) / 1_000_000.0,
+        });
         out.print("{s}\n", .{jbuf.items});
+        if (sc.last_status != .complete) return error.PartialScan;
         return;
     }
 
@@ -568,6 +593,9 @@ fn runScanCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts) 
     defer sc.deinit();
 
     const root = try sc.scan(path);
+    if (sc.last_status != .complete) {
+        out.print("Scan status: {s}; data below is partial and must not be treated as complete.\n", .{@tagName(sc.last_status)});
+    }
 
     var size_buf: [32]u8 = undefined;
     const size_str = types.DiskNode.formatSize(root.size_bytes, &size_buf);
@@ -576,31 +604,33 @@ fn runScanCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts) 
     const alloc_str = types.DiskNode.formatSize(root.allocated_bytes, &alloc_buf);
 
     const elapsed_ms = @as(f64, @floatFromInt(sc.telemetry.elapsed_ns)) / 1_000_000.0;
-    const mb_per_sec = sc.telemetry.throughputBytesPerSec() / (1024.0 * 1024.0);
+    const logical_mb_per_sec = sc.telemetry.throughputBytesPerSec() / (1024.0 * 1024.0);
     const files_per_sec = sc.telemetry.throughputFilesPerSec();
 
     out.print(
         \\
-        \\✓ Scan Completed in {d:.2} ms
+        \\Scan status: {s} in {d:.2} ms
         \\--------------------------------------------------------------------------------
         \\  Logical Size:     {s}
         \\  Allocated Blocks: {s}
         \\  Total Files:      {d}
         \\  Total Folders:    {d}
         \\  Scan Errors:      {d}
-        \\  Throughput:       {d:.2} MB/s  ({d:.0} files/sec)
+        \\  Indexing rate:    {d:.2} logical MB/s  ({d:.0} items/sec)
         \\--------------------------------------------------------------------------------
         \\
     , .{
+        @tagName(sc.last_status),
         elapsed_ms,
         size_str,
         alloc_str,
         root.file_count,
         root.dir_count,
         sc.telemetry.errors_count,
-        mb_per_sec,
+        logical_mb_per_sec,
         files_per_sec,
     });
+    if (sc.last_status != .complete) return error.PartialScan;
 }
 
 fn runCleanCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts) !void {
@@ -639,7 +669,7 @@ fn runCleanCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts)
 
     var total_b: [32]u8 = undefined;
     const total_s = types.DiskNode.formatSize(total_reclaimable, &total_b);
-    out.print("Total Reclaimable Space: \x1b[1;38;2;255;110;64m{s}\x1b[0m across {d} candidates.\n", .{ total_s, items.items.len });
+    out.print("Candidate logical bytes: \x1b[1;38;2;255;110;64m{s}\x1b[0m across {d} suggestions; physical recovery is unknown.\n", .{ total_s, items.items.len });
 
     // C06: --select=<spec> / --interactive execution path. Spec format
     // `34,12` / `3-7` / `all` / `safe`; interactive uses the checkbox TUI.
@@ -715,12 +745,12 @@ fn runCleanCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts)
             n_done += 1;
             freed += op.size_bytes;
             var sz_b: [32]u8 = undefined;
-            out.print("✓ Cleaned #{d} ({s}) → Reclaimed {s}\n", .{ it.id, it.title, types.DiskNode.formatSize(op.size_bytes, &sz_b) });
+            out.print("✓ Moved #{d} ({s}) to Trash; {s} logical bytes. Measured volume change: unknown.\n", .{ it.id, it.title, types.DiskNode.formatSize(op.size_bytes, &sz_b) });
         }
         var f_b: [32]u8 = undefined;
         out.print("\n\x1b[1;32m✓ {d} item(s) processed. {s} {s}\x1b[0m\n", .{
             n_done,
-            if (opts.dry_run) "Would free " else "Freed ",
+            if (opts.dry_run) "Selected candidate logical bytes: " else "Selected logical bytes moved to Trash (volume change unknown): ",
             types.DiskNode.formatSize(freed, &f_b),
         });
         return;
@@ -746,7 +776,7 @@ fn runWinsCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts) 
     var items = try an.generateSmartCleanRecommendations(root);
     defer items.deinit(allocator);
 
-    out.printRaw("\n\x1b[1;32m=== INSTANT QUICK-WINS (ZERO-RISK RECLAIMABLES) ===\x1b[0m\n\n");
+    out.printRaw("\n\x1b[1;32m=== QUICK-WIN SUGGESTIONS (REVIEW BEFORE CLEANUP) ===\x1b[0m\n\n");
 
     var total_wins: u64 = 0;
     var count: usize = 0;
@@ -774,7 +804,7 @@ fn runWinsCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts) 
 
     var win_b: [32]u8 = undefined;
     const win_s = types.DiskNode.formatSize(total_wins, &win_b);
-    out.print("\nTotal Zero-Risk Instant Wins: \x1b[1;32m{s}\x1b[0m\n", .{win_s});
+    out.print("\nSuggested candidate logical bytes: \x1b[1;32m{s}\x1b[0m; actual recovery is unknown.\n", .{win_s});
 
     // C06: `wins <path> --select=2,3` trashes numbered quick-wins; `--select=all`
     // = classic "clean safe". Interactive checkbox if -i.
@@ -839,10 +869,10 @@ fn runWinsCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts) 
             n_done += 1;
             freed += op.size_bytes;
             var sz_b: [32]u8 = undefined;
-            out.print("✓ Trashed ({s}) → Freed {s}\n", .{ op.original_path, types.DiskNode.formatSize(op.size_bytes, &sz_b) });
+            out.print("✓ Moved to Trash ({s}); {s} logical bytes. Measured volume change: unknown.\n", .{ op.original_path, types.DiskNode.formatSize(op.size_bytes, &sz_b) });
         }
         var f_b: [32]u8 = undefined;
-        out.print("\n\x1b[1;32m✓ {d} quick-win(s) processed. {s}{s}\x1b[0m\n", .{ n_done, if (opts.dry_run) "Would free " else "Freed ", types.DiskNode.formatSize(freed, &f_b) });
+        out.print("\n\x1b[1;32m✓ {d} quick-win(s) processed. Selected logical bytes: {s}. Measured volume change: unknown.\x1b[0m\n", .{ n_done, types.DiskNode.formatSize(freed, &f_b) });
         return;
     }
 
@@ -973,10 +1003,10 @@ fn runDedupCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts)
 
     out.print(
         \\
-        \\✓ Deduplication Analysis Complete
+        \\✓ Duplicate Candidate Analysis Complete
         \\--------------------------------------------------------------------------------
         \\  Duplicate Clusters: {d}
-        \\  Total Reclaimable:  \x1b[1;38;2;255;110;64m{s}\x1b[0m
+        \\  Duplicate candidate logical bytes:  \x1b[1;38;2;255;110;64m{s}\x1b[0m (physical recovery unknown)
         \\--------------------------------------------------------------------------------
         \\
     , .{
@@ -1029,7 +1059,7 @@ fn runAnalyzeCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpt
         for (suggestions.items, 0..) |sug, idx| {
             var sz_buf: [32]u8 = undefined;
             const sz_str = types.DiskNode.formatSize(sug.size_bytes, &sz_buf);
-            out.print("  {d}. {s} ({s}) -> Reclaim {s}\n", .{
+            out.print("  {d}. {s} ({s}) — Candidate logical bytes: {s}; physical recovery unknown.\n", .{
                 idx + 1,
                 sug.title,
                 sug.path,

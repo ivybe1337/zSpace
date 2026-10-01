@@ -145,6 +145,11 @@ pub inline fn sendGetRect(target: id, sel: SEL) NSRect {
     return @as(F, @ptrCast(&objc_msgSend))(target, sel);
 }
 
+pub inline fn sendConvertPointFromView(target: id, sel: SEL, pt: NSPoint, from_view: id) NSPoint {
+    const F = *const fn (id, SEL, NSPoint, id) callconv(.c) NSPoint;
+    return @as(F, @ptrCast(&objc_msgSend))(target, sel, pt, from_view);
+}
+
 // --- Convenience Object Helpers --------------------------------------------
 
 pub fn nsString(cstr: []const u8) id {
@@ -190,10 +195,84 @@ pub fn getCurrentGraphicsContext() CGContextRef {
     return @as(F, @ptrCast(&objc_msgSend))(ctx, sel_CGContext);
 }
 
-pub fn drawStringAtPoint(text: []const u8, x: f64, y: f64) void {
+pub fn drawStringWithColor(text: []const u8, x: f64, y: f64, r: f64, g: f64, b: f64, a: f64) void {
     const str = nsString(text) orelse return;
+    const col = nsColor(r, g, b, a);
+    if (col == null) return;
+
+    const NSDictionary = objc_getClass("NSDictionary");
+    const sel_dictWithObjKey = sel_registerName("dictionaryWithObject:forKey:");
+    const key_str = nsString("NSColor") orelse return;
+
+    const F_dict = *const fn (Class, SEL, id, id) callconv(.c) id;
+    const attrs = @as(F_dict, @ptrCast(&objc_msgSend))(NSDictionary, sel_dictWithObjKey, col, key_str);
+
     const sel_drawAtPoint = sel_registerName("drawAtPoint:withAttributes:");
-    const F = *const fn (id, SEL, NSPoint, id) callconv(.c) void;
-    @as(F, @ptrCast(&objc_msgSend))(str, sel_drawAtPoint, .{ .x = x, .y = y }, null);
+    const F_draw = *const fn (id, SEL, NSPoint, id) callconv(.c) void;
+    @as(F_draw, @ptrCast(&objc_msgSend))(str, sel_drawAtPoint, .{ .x = x, .y = y }, attrs);
+}
+
+pub fn drawStringAtPoint(text: []const u8, x: f64, y: f64) void {
+    drawStringWithColor(text, x, y, 0.90, 0.93, 0.96, 1.0);
+}
+
+pub fn openFolderDialog(out_buf: []u8) ?[]const u8 {
+    const NSOpenPanel = objc_getClass("NSOpenPanel");
+    if (NSOpenPanel == null) return null;
+    const sel_openPanel = sel_registerName("openPanel");
+    const panel = send0(NSOpenPanel, sel_openPanel);
+    if (panel == null) return null;
+
+    const sel_setCanChooseFiles = sel_registerName("setCanChooseFiles:");
+    sendVoidBool(panel, sel_setCanChooseFiles, false);
+
+    const sel_setCanChooseDirectories = sel_registerName("setCanChooseDirectories:");
+    sendVoidBool(panel, sel_setCanChooseDirectories, true);
+
+    const sel_setAllowsMultipleSelection = sel_registerName("setAllowsMultipleSelection:");
+    sendVoidBool(panel, sel_setAllowsMultipleSelection, false);
+
+    const sel_setTitle = sel_registerName("setTitle:");
+    const title_str = nsString("Select Directory to Analyze");
+    sendVoid1(panel, sel_setTitle, title_str);
+
+    const sel_setPrompt = sel_registerName("setPrompt:");
+    const prompt_str = nsString("Select");
+    sendVoid1(panel, sel_setPrompt, prompt_str);
+
+    const sel_runModal = sel_registerName("runModal");
+    const F_runModal = *const fn (id, SEL) callconv(.c) isize;
+    const res = @as(F_runModal, @ptrCast(&objc_msgSend))(panel, sel_runModal);
+
+    if (res == 1) { // NSModalResponseOK = 1
+        const sel_URLs = sel_registerName("URLs");
+        const urls = send0(panel, sel_URLs);
+        if (urls == null) return null;
+
+        const sel_count = sel_registerName("count");
+        const F_count = *const fn (id, SEL) callconv(.c) usize;
+        const count = @as(F_count, @ptrCast(&objc_msgSend))(urls, sel_count);
+        if (count == 0) return null;
+
+        const sel_objectAtIndex = sel_registerName("objectAtIndex:");
+        const F_objAtIndex = *const fn (id, SEL, usize) callconv(.c) id;
+        const url = @as(F_objAtIndex, @ptrCast(&objc_msgSend))(urls, sel_objectAtIndex, 0);
+        if (url == null) return null;
+
+        const sel_path = sel_registerName("path");
+        const ns_path = send0(url, sel_path);
+        if (ns_path == null) return null;
+
+        const sel_UTF8String = sel_registerName("UTF8String");
+        const F_utf8 = *const fn (id, SEL) callconv(.c) [*c]const u8;
+        const c_path = @as(F_utf8, @ptrCast(&objc_msgSend))(ns_path, sel_UTF8String);
+        if (c_path == null) return null;
+
+        const path_slice = std.mem.span(c_path);
+        if (path_slice.len > out_buf.len) return null;
+        @memcpy(out_buf[0..path_slice.len], path_slice);
+        return out_buf[0..path_slice.len];
+    }
+    return null;
 }
 

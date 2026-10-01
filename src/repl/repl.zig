@@ -156,8 +156,8 @@ pub const Repl = struct {
             \\CLEANUP & ANALYSIS COMMANDS:
             \\  clean                Show all smart clean recommendations with risk ratings
             \\  clean <id>           Clean recommended item by index (e.g. `clean 1` or `clean 1,2,3`)
-            \\  clean safe           Clean ALL 100% safe zero-risk items in one command
-            \\  wins / quick-wins    Show instant high-yield safe storage wins (>100MB caches)
+            \\  clean safe           Review suggested items, then confirm each Trash move
+            \\  wins / quick-wins    Show cleanup suggestions and candidate logical bytes
             \\  npkill / sweep       Interactive dependency killer (node_modules, target, .zig-cache)
             \\  dedup                Run 3-tier duplicate analysis
             \\  decay / entropy      Compute temporal file age dormancy distribution
@@ -233,6 +233,11 @@ pub const Repl = struct {
 
         // Handle `clean safe` / `clean all-safe`
         if (std.mem.eql(u8, arg, "safe") or std.mem.eql(u8, arg, "all-safe")) {
+            out.printRaw("Selected suggestions:\n");
+            for (items.items) |it| {
+                if (it.risk == .Safe_ZeroRisk) out.print("  {s}  ({d} logical bytes)\n", .{ it.path, it.size_bytes });
+            }
+            if (!confirmTrashAction()) return;
             var cleaned_bytes: u64 = 0;
             var cleaned_count: usize = 0;
 
@@ -246,7 +251,7 @@ pub const Repl = struct {
 
             var sz_b: [32]u8 = undefined;
             const sz_s = types.DiskNode.formatSize(cleaned_bytes, &sz_b);
-            out.print("\n\x1b[1;32m✓ Cleaned {d} zero-risk items. Reclaimed {s} safely!\x1b[0m\n", .{ cleaned_count, sz_s });
+            out.print("\n✓ Moved {d} selected items to Trash. {s} logical bytes; measured volume change unknown.\n", .{ cleaned_count, sz_s });
 
             // Refresh recommendations
             items.deinit(self.allocator);
@@ -268,6 +273,8 @@ pub const Repl = struct {
 
                 for (items.items) |it| {
                     if (it.id == target_id) {
+                        out.print("Candidate: {s} ({d} logical bytes)\n", .{ it.path, it.size_bytes });
+                        if (!confirmTrashAction()) continue;
                         if (it.risk.isLocked()) {
                             out.print("\x1b[1;31m[BLOCKED] Item #{d} is SYSTEM LOCKED and cannot be deleted!\x1b[0m\n", .{it.id});
                             continue;
@@ -280,7 +287,7 @@ pub const Repl = struct {
 
                         var sz_b: [32]u8 = undefined;
                         const sz_s = types.DiskNode.formatSize(op.size_bytes, &sz_b);
-                        out.print("✓ Cleaned #{d} ({s}) -> Reclaimed {s}\n", .{ it.id, it.title, sz_s });
+                        out.print("✓ Moved #{d} ({s}) to Trash; {s} logical bytes. Measured volume change unknown.\n", .{ it.id, it.title, sz_s });
                         any_cleaned = true;
                     }
                 }
@@ -341,7 +348,7 @@ pub const Repl = struct {
         var sz_b: [32]u8 = undefined;
         const sz_s = types.DiskNode.formatSize(total_reclaimable, &sz_b);
 
-        out.print("\n\x1b[1;32m=== QUICK WINS STORAGE PURGE ===\x1b[0m Total Instant Reclaimable: \x1b[1;38;2;255;110;64m{s}\x1b[0m\n\n", .{sz_s});
+        out.print("\n=== QUICK-WIN SUGGESTIONS === Candidate logical bytes: {s}; actual recovery unknown.\n\n", .{sz_s});
 
         if (quick_items.items.len == 0) {
             out.printRaw("✓ No immediate bulk caches found in this subtree.\n");
@@ -705,6 +712,8 @@ pub const Repl = struct {
         // shown by executeLs; comma list; no ranges here to keep destructive
         // ops explicit).
         if (target_name.len > 0 and std.ascii.isDigit(target_name[0])) {
+            out.print("Review selection '{s}'. Type TRASH to move the selected items to macOS Trash: ", .{target_name});
+            if (!confirmTrashAction()) return;
             var it = std.mem.splitScalar(u8, target_name, ',');
             var any_ok = false;
             var freed: u64 = 0;
@@ -747,8 +756,10 @@ pub const Repl = struct {
                     out.print("\x1b[1;31m[PROHIBITED] '{s}' is protected ({s}) and cannot be trashed.\x1b[0m\n", .{ child.path, child.protection.label() });
                     return;
                 }
+                out.print("Candidate: {s} ({d} logical bytes). Type TRASH to confirm: ", .{ child.path, child.size_bytes });
+                if (!confirmTrashAction()) return;
                 const op = try self.cleaner_inst.safeMoveToTrash(child.path, child.size_bytes, child.protection);
-                out.print("✓ Safely moved to system Trash: {s}\n", .{op.original_path});
+                out.print("✓ Moved to system Trash: {s}. Measured volume change unknown.\n", .{op.original_path});
                 return;
             }
         }
@@ -862,3 +873,18 @@ pub const Repl = struct {
         out.printRaw("No trash operations in recent history to undo.\n");
     }
 };
+
+fn confirmTrashAction() bool {
+    var response: [64]u8 = undefined;
+    const n = c.read(0, &response, response.len);
+    if (n <= 0) {
+        out.printRaw("\nNo confirmation received; cancelled.\n");
+        return false;
+    }
+    const answer = std.mem.trim(u8, response[0..@intCast(n)], " \t\r\n");
+    if (!std.mem.eql(u8, answer, "TRASH")) {
+        out.printRaw("Cancelled; nothing moved.\n");
+        return false;
+    }
+    return true;
+}
