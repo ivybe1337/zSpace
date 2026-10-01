@@ -65,10 +65,10 @@ fn parseMinSize(text: []const u8) !u64 {
     const num = std.fmt.parseInt(u64, text[0..num_end], 10) catch return error.InvalidMinSize;
     const suffix = text[num_end..];
     if (suffix.len == 0 or std.ascii.eqlIgnoreCase(suffix, "b")) return num;
-    if (std.ascii.eqlIgnoreCase(suffix, "k") or std.ascii.eqlIgnoreCase(suffix, "kb")) return num * 1024;
-    if (std.ascii.eqlIgnoreCase(suffix, "m") or std.ascii.eqlIgnoreCase(suffix, "mb")) return num * 1024 * 1024;
-    if (std.ascii.eqlIgnoreCase(suffix, "g") or std.ascii.eqlIgnoreCase(suffix, "gb")) return num * 1024 * 1024 * 1024;
-    if (std.ascii.eqlIgnoreCase(suffix, "t") or std.ascii.eqlIgnoreCase(suffix, "tb")) return num * 1024 * 1024 * 1024 * 1024;
+    if (std.ascii.eqlIgnoreCase(suffix, "k") or std.ascii.eqlIgnoreCase(suffix, "kb")) return std.math.mul(u64, num, 1024) catch error.InvalidMinSize;
+    if (std.ascii.eqlIgnoreCase(suffix, "m") or std.ascii.eqlIgnoreCase(suffix, "mb")) return std.math.mul(u64, num, 1024 * 1024) catch error.InvalidMinSize;
+    if (std.ascii.eqlIgnoreCase(suffix, "g") or std.ascii.eqlIgnoreCase(suffix, "gb")) return std.math.mul(u64, num, 1024 * 1024 * 1024) catch error.InvalidMinSize;
+    if (std.ascii.eqlIgnoreCase(suffix, "t") or std.ascii.eqlIgnoreCase(suffix, "tb")) return std.math.mul(u64, num, 1024 * 1024 * 1024 * 1024) catch error.InvalidMinSize;
     return error.InvalidMinSize;
 }
 
@@ -313,6 +313,12 @@ pub fn runCli(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
 
     logVerbose(opts, "[zspace] cmd={s} path={s} format={s} dry_run={} min_size={d}", .{ command, real_path, if (opts.format == .json) "json" else "table", opts.dry_run, opts.min_size });
 
+    if ((std.mem.eql(u8, command, "wins") or std.mem.eql(u8, command, "quick-wins") or std.mem.eql(u8, command, "clean")) and
+        opts.format == .json and (opts.select.len > 0 or opts.interactive))
+    {
+        return usageError("--format=json cannot be combined with --select or --interactive", .{});
+    }
+
     if (std.mem.eql(u8, command, "scan")) {
         runScanCmd(allocator, real_path, opts) catch return EXIT_SCAN;
         return EXIT_OK;
@@ -440,7 +446,6 @@ fn printVersion(opts: GlobalOpts) void {
 }
 
 fn runSnapshotCmd(allocator: std.mem.Allocator, positionals: []const []const u8, opts: GlobalOpts) !void {
-    _ = opts;
     if (positionals.len < 1) {
         out.printRaw("usage: zspace snapshot save <path> -o <file> | zspace snapshot diff <a> <b> [--format=json]\n");
         return error.InvalidArgs;
@@ -476,7 +481,7 @@ fn runSnapshotCmd(allocator: std.mem.Allocator, positionals: []const []const u8,
             for (diffs.items) |d| allocator.free(d.path);
             diffs.deinit(allocator);
         }
-        const as_json = for (positionals) |p| {
+        const as_json = (opts.format == .json) or for (positionals) |p| {
             if (std.mem.eql(u8, p, "--format=json")) break true;
         } else false;
         if (as_json) {
@@ -638,6 +643,12 @@ fn runCleanCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts)
     defer sc.deinit();
 
     const root = try sc.scan(path);
+
+    if (sc.last_status != .complete) {
+        out.print("Scan status: {s}; suggestions, selection, and cleanup withheld.\n", .{@tagName(sc.last_status)});
+        return error.PartialScan;
+    }
+
     var an = analyzer.Analyzer.init(allocator);
     var items = try an.generateSmartCleanRecommendations(root);
     defer items.deinit(allocator);
@@ -776,7 +787,45 @@ fn runWinsCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts) 
     var items = try an.generateSmartCleanRecommendations(root);
     defer items.deinit(allocator);
 
+    if (opts.format == .json and opts.select.len == 0 and !opts.interactive) {
+        var jbuf: std.ArrayList(u8) = .{ .items = &.{}, .capacity = 0 };
+        defer jbuf.deinit(allocator);
+        var jw = json.JsonWriter{ .list = &jbuf, .allocator = allocator };
+        const status_str = switch (sc.last_status) { .complete => "complete", .partial => "partial", .cancelled => "cancelled", .failed => "failed" };
+        try jw.writeAll("{\"schema_version\":1,\"status\":");
+        try json.writeJsonEscaped(status_str, &jw);
+        try jw.print(",\"complete\":{s},\"data\":{{\"quick_wins\":[", .{if (sc.last_status == .complete) "true" else "false"});
+        if (sc.last_status == .complete) {
+            var num_b: [32]u8 = undefined;
+            var first_w = true;
+            for (items.items) |it| {
+                if (it.risk == .Safe_ZeroRisk and it.is_quick_win) {
+                    if (!first_w) try jw.writeByte(',');
+                    first_w = false;
+                    try jw.writeAll("{\"title\":");
+                    try jw.writeEscaped(it.title);
+                    try jw.writeAll(",\"path\":");
+                    try jw.writeEscaped(it.path);
+                    try jw.writeAll(",\"size_bytes\":");
+                    try jw.writeAll(std.fmt.bufPrint(&num_b, "{d}", .{it.size_bytes}) catch "0");
+                    try jw.writeByte('}');
+                }
+            }
+            try jw.writeAll("]},\"errors\":[]}\n");
+        } else {
+            try jw.writeAll("]},\"errors\":[{\"message\":\"scan was incomplete; quick-win results withheld\"}]}\n");
+        }
+        out.printRaw(jbuf.items);
+        if (sc.last_status != .complete) return error.PartialScan;
+        return;
+    }
+
     out.printRaw("\n\x1b[1;32m=== QUICK-WIN SUGGESTIONS (REVIEW BEFORE CLEANUP) ===\x1b[0m\n\n");
+
+    if (sc.last_status != .complete) {
+        out.print("Scan status: {s}; quick-wins, selection, and cleanup withheld.\n", .{@tagName(sc.last_status)});
+        return error.PartialScan;
+    }
 
     var total_wins: u64 = 0;
     var count: usize = 0;
@@ -978,15 +1027,31 @@ fn runDrivesCmd(allocator: std.mem.Allocator, opts: GlobalOpts) !void {
 }
 
 fn runDedupCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts) !void {
-    _ = opts;
-    out.print("\x1b[1;36mScanning & Deduplicating:\x1b[0m {s}\n", .{path});
-
     var sc = scanner.Scanner.init(allocator, .{});
     defer sc.deinit();
 
     const root = try sc.scan(path);
 
+    if (sc.last_status != .complete) {
+        if (opts.format == .json) {
+            var jbuf: std.ArrayList(u8) = .{ .items = &.{}, .capacity = 0 };
+            defer jbuf.deinit(allocator);
+            var jw = json.JsonWriter{ .list = &jbuf, .allocator = allocator };
+            const status_str = switch (sc.last_status) { .complete => "complete", .partial => "partial", .cancelled => "cancelled", .failed => "failed" };
+            try jw.writeAll("{\"schema_version\":1,\"status\":");
+            try json.writeJsonEscaped(status_str, &jw);
+            try jw.writeAll(",\"complete\":false,\"data\":{\"duplicate_clusters\":0,\"total_wasted_bytes\":0,\"clusters\":[]},\"errors\":[{\"message\":\"scan was incomplete; duplicate results withheld\"}]}\n");
+            out.printRaw(jbuf.items);
+        } else {
+            out.print("Scan was incomplete; duplicate results withheld.\n", .{});
+        }
+        return error.PartialScan;
+    }
+
     var dedup_engine = dedup.DedupEngine.init(allocator);
+    if (opts.min_size > 0) {
+        dedup_engine.min_size_bytes = opts.min_size;
+    }
     var clusters = try dedup_engine.findDuplicates(root);
     defer {
         for (clusters.items) |*c_item| c_item.items.deinit(allocator);
@@ -997,6 +1062,44 @@ fn runDedupCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts)
     for (clusters.items) |cl| {
         total_wasted += cl.total_wasted_bytes;
     }
+
+    if (opts.format == .json) {
+        var jbuf: std.ArrayList(u8) = .{ .items = &.{}, .capacity = 0 };
+        defer jbuf.deinit(allocator);
+        var jw = json.JsonWriter{ .list = &jbuf, .allocator = allocator };
+        const status_str = switch (sc.last_status) { .complete => "complete", .partial => "partial", .cancelled => "cancelled", .failed => "failed" };
+        try jw.writeAll("{\"schema_version\":1,\"status\":");
+        try json.writeJsonEscaped(status_str, &jw);
+        try jw.print(",\"complete\":{s},\"data\":{{\"duplicate_clusters\":", .{if (sc.last_status == .complete) "true" else "false"});
+        var num_b: [32]u8 = undefined;
+        try jw.writeAll(std.fmt.bufPrint(&num_b, "{d}", .{clusters.items.len}) catch "0");
+        try jw.writeAll(",\"total_wasted_bytes\":");
+        try jw.writeAll(std.fmt.bufPrint(&num_b, "{d}", .{total_wasted}) catch "0");
+        try jw.writeAll(",\"clusters\":[");
+        for (clusters.items, 0..) |cl, c_i| {
+            if (c_i > 0) try jw.writeByte(',');
+            try jw.writeAll("{\"size_each\":");
+            try jw.writeAll(std.fmt.bufPrint(&num_b, "{d}", .{cl.size_each}) catch "0");
+            try jw.writeAll(",\"total_wasted_bytes\":");
+            try jw.writeAll(std.fmt.bufPrint(&num_b, "{d}", .{cl.total_wasted_bytes}) catch "0");
+            try jw.writeAll(",\"items\":[");
+            for (cl.items.items, 0..) |it, it_i| {
+                if (it_i > 0) try jw.writeByte(',');
+                try jw.writeAll("{\"path\":");
+                try jw.writeEscaped(it.path);
+                try jw.writeAll(",\"is_original\":");
+                try jw.writeAll(if (it.is_original) "true" else "false");
+                try jw.writeByte('}');
+            }
+            try jw.writeAll("]}");
+        }
+        try jw.writeAll("]},\"errors\":[]}\n");
+        out.printRaw(jbuf.items);
+        if (sc.last_status != .complete) return error.PartialScan;
+        return;
+    }
+
+    out.print("\x1b[1;36mScanning & Deduplicating:\x1b[0m {s}\n", .{path});
 
     var wasted_buf: [32]u8 = undefined;
     const wasted_str = types.DiskNode.formatSize(total_wasted, &wasted_buf);
@@ -1028,7 +1131,6 @@ fn runDedupCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts)
 }
 
 fn runAnalyzeCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts) !void {
-    _ = opts;
     var sc = scanner.Scanner.init(allocator, .{});
     defer sc.deinit();
 
@@ -1038,6 +1140,51 @@ fn runAnalyzeCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpt
     const categories = try an.aggregateCategories(root);
     var suggestions = try an.generateSmartCleanRecommendations(root);
     defer suggestions.deinit(allocator);
+
+    if (opts.format == .json) {
+        var jbuf: std.ArrayList(u8) = .{ .items = &.{}, .capacity = 0 };
+        defer jbuf.deinit(allocator);
+        var jw = json.JsonWriter{ .list = &jbuf, .allocator = allocator };
+        const status_str = switch (sc.last_status) { .complete => "complete", .partial => "partial", .cancelled => "cancelled", .failed => "failed" };
+        try jw.writeAll("{\"schema_version\":1,\"status\":");
+        try json.writeJsonEscaped(status_str, &jw);
+        try jw.print(",\"complete\":{s},\"data\":{{\"categories\":[", .{if (sc.last_status == .complete) "true" else "false"});
+        var num_b: [32]u8 = undefined;
+        var first_cat = true;
+        for (categories) |cat| {
+            if (cat.total_bytes == 0) continue;
+            if (!first_cat) try jw.writeByte(',');
+            first_cat = false;
+            try jw.writeAll("{\"name\":");
+            try jw.writeEscaped(cat.category.displayName());
+            try jw.writeAll(",\"total_bytes\":");
+            try jw.writeAll(std.fmt.bufPrint(&num_b, "{d}", .{cat.total_bytes}) catch "0");
+            try jw.writeAll(",\"total_files\":");
+            try jw.writeAll(std.fmt.bufPrint(&num_b, "{d}", .{cat.total_files}) catch "0");
+            try jw.writeAll(",\"percent_of_total\":");
+            try jw.writeAll(std.fmt.bufPrint(&num_b, "{d:.4}", .{cat.percent_of_total}) catch "0");
+            try jw.writeByte('}');
+        }
+        try jw.writeAll("],\"recommendations\":[");
+        if (sc.last_status == .complete) {
+            for (suggestions.items, 0..) |sug, s_i| {
+                if (s_i > 0) try jw.writeByte(',');
+                try jw.writeAll("{\"title\":");
+                try jw.writeEscaped(sug.title);
+                try jw.writeAll(",\"path\":");
+                try jw.writeEscaped(sug.path);
+                try jw.writeAll(",\"size_bytes\":");
+                try jw.writeAll(std.fmt.bufPrint(&num_b, "{d}", .{sug.size_bytes}) catch "0");
+                try jw.writeByte('}');
+            }
+            try jw.writeAll("]},\"errors\":[]}\n");
+        } else {
+            try jw.writeAll("]},\"errors\":[{\"message\":\"scan was incomplete; recommendations withheld\"}]}\n");
+        }
+        out.printRaw(jbuf.items);
+        if (sc.last_status != .complete) return error.PartialScan;
+        return;
+    }
 
     out.printRaw("\n\x1b[1;36m=== CATEGORY COMPOSITION ===\x1b[0m\n");
     for (categories) |cat| {
@@ -1053,6 +1200,10 @@ fn runAnalyzeCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpt
     }
 
     out.printRaw("\n\x1b[1;38;2;255;110;64m=== SMART CLEANUP RECOMMENDATIONS ===\x1b[0m\n");
+    if (sc.last_status != .complete) {
+        out.print("  Scan status: {s}; recommendations withheld.\n", .{@tagName(sc.last_status)});
+        return error.PartialScan;
+    }
     if (suggestions.items.len == 0) {
         out.printRaw("  ✓ No bulk stale caches found.\n");
     } else {
@@ -1113,7 +1264,6 @@ fn run3DCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts) !v
 }
 
 fn runTopCmd(allocator: std.mem.Allocator, path: []const u8, limit: usize, opts: GlobalOpts) !void {
-    _ = opts;
     var sc = scanner.Scanner.init(allocator, .{});
     defer sc.deinit();
 
@@ -1122,6 +1272,38 @@ fn runTopCmd(allocator: std.mem.Allocator, path: []const u8, limit: usize, opts:
     var an = analyzer.Analyzer.init(allocator);
     var top_files = try an.findTopLargestFiles(root, limit);
     defer top_files.deinit(allocator);
+
+    if (opts.format == .json) {
+        var jbuf: std.ArrayList(u8) = .{ .items = &.{}, .capacity = 0 };
+        defer jbuf.deinit(allocator);
+        var jw = json.JsonWriter{ .list = &jbuf, .allocator = allocator };
+        const status_str = switch (sc.last_status) { .complete => "complete", .partial => "partial", .cancelled => "cancelled", .failed => "failed" };
+        try jw.writeAll("{\"schema_version\":1,\"status\":");
+        try json.writeJsonEscaped(status_str, &jw);
+        try jw.print(",\"complete\":{s},\"data\":{{\"top_files\":[", .{if (sc.last_status == .complete) "true" else "false"});
+        if (sc.last_status == .complete) {
+            var num_b: [32]u8 = undefined;
+            for (top_files.items, 0..) |f, idx| {
+                if (idx > 0) try jw.writeByte(',');
+                try jw.writeAll("{\"path\":");
+                try jw.writeEscaped(f.path);
+                try jw.writeAll(",\"size_bytes\":");
+                try jw.writeAll(std.fmt.bufPrint(&num_b, "{d}", .{f.size_bytes}) catch "0");
+                try jw.writeByte('}');
+            }
+            try jw.writeAll("]},\"errors\":[]}\n");
+        } else {
+            try jw.writeAll("]},\"errors\":[{\"message\":\"scan was incomplete; top files withheld\"}]}\n");
+        }
+        out.printRaw(jbuf.items);
+        if (sc.last_status != .complete) return error.PartialScan;
+        return;
+    }
+
+    if (sc.last_status != .complete) {
+        out.print("Scan status: {s}; top files withheld.\n", .{@tagName(sc.last_status)});
+        return error.PartialScan;
+    }
 
     out.print("\n\x1b[1;36mTop {d} Largest Files in {s}:\x1b[0m\n\n", .{ top_files.items.len, path });
     for (top_files.items, 0..) |f, idx| {

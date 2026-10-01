@@ -18,6 +18,10 @@ pub const JsonWriter = struct {
         const slice = try std.fmt.bufPrint(&buf, fmt, args);
         try self.list.appendSlice(self.allocator, slice);
     }
+
+    pub fn writeEscaped(self: *JsonWriter, s: []const u8) !void {
+        try writeJsonEscaped(s, self);
+    }
 };
 
 pub fn writeJsonEscaped(raw: []const u8, writer: *JsonWriter) !void {

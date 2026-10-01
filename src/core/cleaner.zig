@@ -35,6 +35,8 @@ const ObjCSel = ?*anyopaque;
 extern "c" fn objc_getClass(n: [*:0]const u8) ObjCClass;
 extern "c" fn sel_registerName(n: [*:0]const u8) ObjCSel;
 extern "c" fn objc_msgSend(...) ObjCId;
+extern "c" fn renamex_np(oldpath: [*:0]const u8, newpath: [*:0]const u8, flags: c_uint) c_int;
+const RENAME_EXCL: c_uint = 0x00000004;
 // C04: per-selector typed msgSend aliases. Variadic objc_msgSend is UB on
 // arm64 for methods taking/returning structs or BOOL (C01 lesson); cast the
 // symbol to the exact signature per call site instead.
@@ -571,22 +573,69 @@ pub const Cleaner = struct {
             receipt_hex[i * 2 + 1] = hex[b & 0x0f];
         }
         const rid = try self.allocator.dupe(u8, &receipt_hex);
-        errdefer self.allocator.free(rid);
+        var rid_owned = false;
+        defer if (!rid_owned) self.allocator.free(rid);
         try self.persistTrashIntent(rid, target_path, &lst0, size_bytes, now);
+
+        // Re-confirm file identity and protection class immediately before any move operation
+        var current: c.struct_stat = undefined;
+        if (c.lstat(@as([*:0]const u8, @ptrCast(&tz)), &current) != 0 or
+            current.st_dev != lst0.st_dev or current.st_ino != lst0.st_ino or
+            current.st_mode != lst0.st_mode)
+        {
+            return CleanerError.ItemNotFound;
+        }
+        if (classifier.classifyProtection(target_path).isProtected()) return CleanerError.ProtectedPath;
 
         var method: types.TrashMethod = .nsfilemanager;
         var owned_trash: ?[]u8 = null;
-        if (comptime @import("builtin").os.tag == .macos) {
-            // Confirm the same filesystem object still occupies the path
-            // immediately before passing it to NSFileManager.
-            var current: c.struct_stat = undefined;
-            if (c.lstat(@as([*:0]const u8, @ptrCast(&tz)), &current) != 0 or
-                current.st_dev != lst0.st_dev or current.st_ino != lst0.st_ino or
-                current.st_mode != lst0.st_mode)
-            {
-                return CleanerError.ItemNotFound;
+        const custom_trash: ?[]const u8 = blk: {
+            if (c.getenv("ZSPACE_TRASH_DIR")) |v| {
+                const s = std.mem.span(@as([*:0]const u8, @ptrCast(v)));
+                if (s.len > 0) break :blk s;
             }
-            if (classifier.classifyProtection(target_path).isProtected()) return CleanerError.ProtectedPath;
+            break :blk null;
+        };
+
+        if (custom_trash) |s| {
+            const bname = std.fs.path.basename(target_path);
+            const dest_name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ bname, rid });
+            defer self.allocator.free(dest_name);
+            const dest = try std.fs.path.join(self.allocator, &.{ s, dest_name });
+            defer if (owned_trash == null) self.allocator.free(dest);
+            var dest_z: [4096]u8 = undefined;
+            if (dest.len + 1 <= dest_z.len) {
+                @memcpy(dest_z[0..dest.len], dest);
+                dest_z[dest.len] = 0;
+                var moved = false;
+                if (comptime @import("builtin").os.tag == .macos) {
+                    if (renamex_np(@as([*:0]const u8, @ptrCast(&tz)), @as([*:0]const u8, @ptrCast(&dest_z)), RENAME_EXCL) == 0) {
+                        moved = true;
+                    }
+                } else {
+                    // Non-macOS POSIX fallback: atomic link+unlink for non-directories
+                    if (!is_dir0) {
+                        if (c.link(@as([*:0]const u8, @ptrCast(&tz)), @as([*:0]const u8, @ptrCast(&dest_z))) == 0) {
+                            if (c.unlink(@as([*:0]const u8, @ptrCast(&tz))) == 0) {
+                                moved = true;
+                            } else {
+                                _ = c.unlink(@as([*:0]const u8, @ptrCast(&dest_z)));
+                            }
+                        }
+                    } else {
+                        if (c.access(@as([*:0]const u8, @ptrCast(&dest_z)), c.F_OK) != 0) {
+                            if (c.rename(@as([*:0]const u8, @ptrCast(&tz)), @as([*:0]const u8, @ptrCast(&dest_z))) == 0) {
+                                moved = true;
+                            }
+                        }
+                    }
+                }
+                if (moved) {
+                    owned_trash = dest;
+                    method = .rename_same_volume;
+                }
+            }
+        } else if (comptime @import("builtin").os.tag == .macos) {
             if (haveObjC()) {
                 const pool = objc_autoreleasePoolPush();
                 const url = makeFileURL(target_path, is_dir0);
@@ -604,9 +653,14 @@ pub const Cleaner = struct {
         // rename, copy/unlink, or permanent deletion.
         if (owned_trash == null) return CleanerError.TrashFailed;
         const tpath = owned_trash orelse return CleanerError.TrashFailed;
-        errdefer self.allocator.free(tpath);
+        var tpath_owned = false;
+        defer if (!tpath_owned) self.allocator.free(tpath);
+        const orig_path = try self.allocator.dupe(u8, target_path);
+        var orig_owned = false;
+        defer if (!orig_owned) self.allocator.free(orig_path);
+
         const op = types.CleanOperation{
-            .original_path = try self.allocator.dupe(u8, target_path),
+            .original_path = orig_path,
             .trash_path = tpath,
             .size_bytes = size_bytes,
             .timestamp_ns = now,
@@ -616,7 +670,40 @@ pub const Cleaner = struct {
             .method = method,
         };
         try self.journal.append(self.allocator, op);
-        try self.persistJournalLine(&self.journal.items[self.journal.items.len - 1]);
+        orig_owned = true;
+        tpath_owned = true;
+        rid_owned = true;
+
+        self.persistJournalLine(&self.journal.items[self.journal.items.len - 1]) catch |persist_err| {
+            // Attempt rollback of the trash move so the file isn't left in Trash without a durable record
+            if (self.restoreOperation(&op)) {
+                _ = self.journal.pop();
+                orig_owned = false;
+                tpath_owned = false;
+                rid_owned = false;
+                return persist_err;
+            } else |rollback_err| {
+                if (rollback_err == CleanerError.HashMismatch) {
+                    // Rename back succeeded; file is restored to original_path even though post-restore digest differed
+                    _ = self.journal.pop();
+                    orig_owned = false;
+                    tpath_owned = false;
+                    rid_owned = false;
+                    return persist_err;
+                }
+                std.debug.print("warning: failed to roll back item from Trash ({s}) after journal persistence failure ({s}); receipt={s}, trash_path={s}, original_path={s}\n", .{
+                    @errorName(rollback_err),
+                    @errorName(persist_err),
+                    rid,
+                    tpath,
+                    orig_path,
+                });
+                // Durably record the outcome as failed_rollback (best-effort) so that a subsequent
+                // process hydration can discover and undo the orphaned item in Trash.
+                _ = self.persistJournalLineOutcome(&op, "failed_rollback") catch {};
+                return persist_err;
+            }
+        };
         return self.journal.items[self.journal.items.len - 1];
     }
 
@@ -639,6 +726,10 @@ pub const Cleaner = struct {
     }
 
     pub fn persistJournalLine(self: *Cleaner, op: *const types.CleanOperation) !void {
+        return self.persistJournalLineOutcome(op, "succeeded");
+    }
+
+    pub fn persistJournalLineOutcome(self: *Cleaner, op: *const types.CleanOperation, outcome: []const u8) !void {
         const jp = try journalFilePath(self.allocator);
         defer self.allocator.free(jp);
         ensureParentDir(jp);
@@ -646,7 +737,9 @@ pub const Cleaner = struct {
         defer line.deinit(self.allocator);
         var hexb: [64]u8 = undefined;
         const hx = blake3Hex(op.blake3, &hexb);
-        try line.appendSlice(self.allocator, "{\"schema_version\":1,\"op\":\"trash\",\"phase\":\"outcome\",\"outcome\":\"succeeded\",\"receipt\":");
+        try line.appendSlice(self.allocator, "{\"schema_version\":1,\"op\":\"trash\",\"phase\":\"outcome\",\"outcome\":");
+        try jsonEscapeInto(&line, self.allocator, outcome);
+        try line.appendSlice(self.allocator, ",\"receipt\":");
         try jsonEscapeInto(&line, self.allocator, op.receipt_id);
         try line.appendSlice(self.allocator, ",\"src\":");
         try jsonEscapeInto(&line, self.allocator, op.original_path);
@@ -871,8 +964,14 @@ pub const Cleaner = struct {
         dz[op.original_path.len] = 0;
         var dsts: c.struct_stat = undefined;
         if (c.lstat(@as([*:0]const u8, @ptrCast(&dz)), &dsts) == 0) return CleanerError.UndoFailed;
-        if (c.rename(@as([*:0]const u8, @ptrCast(&sz)), @as([*:0]const u8, @ptrCast(&dz))) != 0) {
-            return CleanerError.TrashFailed;
+        if (comptime @import("builtin").os.tag == .macos) {
+            if (renamex_np(@as([*:0]const u8, @ptrCast(&sz)), @as([*:0]const u8, @ptrCast(&dz)), RENAME_EXCL) != 0) {
+                return CleanerError.UndoFailed;
+            }
+        } else {
+            if (c.rename(@as([*:0]const u8, @ptrCast(&sz)), @as([*:0]const u8, @ptrCast(&dz))) != 0) {
+                return CleanerError.UndoFailed;
+            }
         }
         var allz = true;
         for (op.blake3) |b| {

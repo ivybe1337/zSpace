@@ -237,6 +237,7 @@ pub const Repl = struct {
             for (items.items) |it| {
                 if (it.risk == .Safe_ZeroRisk) out.print("  {s}  ({d} logical bytes)\n", .{ it.path, it.size_bytes });
             }
+            out.printRaw("\nType 'TRASH' to confirm moving these items to ~/.Trash: ");
             if (!confirmTrashAction()) return;
             var cleaned_bytes: u64 = 0;
             var cleaned_count: usize = 0;
@@ -273,12 +274,13 @@ pub const Repl = struct {
 
                 for (items.items) |it| {
                     if (it.id == target_id) {
-                        out.print("Candidate: {s} ({d} logical bytes)\n", .{ it.path, it.size_bytes });
-                        if (!confirmTrashAction()) continue;
                         if (it.risk.isLocked()) {
                             out.print("\x1b[1;31m[BLOCKED] Item #{d} is SYSTEM LOCKED and cannot be deleted!\x1b[0m\n", .{it.id});
                             continue;
                         }
+                        out.print("Candidate: {s} ({d} logical bytes)\n", .{ it.path, it.size_bytes });
+                        out.printRaw("Type 'TRASH' to confirm moving this item to ~/.Trash: ");
+                        if (!confirmTrashAction()) continue;
 
                         const op = self.cleaner_inst.safeMoveToTrash(it.path, it.size_bytes, .None) catch |err| {
                             out.print("Failed to clean #{d}: {s}\n", .{ it.id, @errorName(err) });
@@ -528,6 +530,16 @@ pub const Repl = struct {
         if (self.current_node == null) {
             out.printRaw("No active scan. Run `scan <path>` first.\n");
             return;
+        }
+
+        const old_node = self.current_node;
+        defer {
+            if (self.current_node != old_node) {
+                if (self.cached_clean_items) |*items| {
+                    items.deinit(self.allocator);
+                    self.cached_clean_items = null;
+                }
+            }
         }
 
         if (std.mem.eql(u8, dest, "..")) {

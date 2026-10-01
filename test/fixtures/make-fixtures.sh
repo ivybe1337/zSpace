@@ -4,7 +4,7 @@
 # which git cannot store -- those two are rebuilt by the Zig tmp-copy step).
 # Usage: sh test/fixtures/make-fixtures.sh
 set -eu
-ROOT="$(CDPATH= cd -- \"$(dirname -- \"$0\")/hermetic-root\" && pwd)"
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/hermetic-root" && pwd)"
 
 mkdir -p "$ROOT/empty-dir" "$ROOT/zero-byte" "$ROOT/header-collision" \
          "$ROOT/git-guard/.git/objects" "$ROOT/git-guard/src" \

@@ -46,7 +46,14 @@ pub const ProtectionClass = enum(u8) {
     CriticalConfig,
 
     pub fn isProtected(self: ProtectionClass) bool {
-        return self != .None;
+        return switch (self) {
+            .None, .ProjectSource => false,
+            .SystemOS, .UserPinned, .GitRepository, .CriticalConfig => true,
+        };
+    }
+
+    pub fn isAdvisory(self: ProtectionClass) bool {
+        return self == .ProjectSource;
     }
 
     pub fn label(self: ProtectionClass) []const u8 {

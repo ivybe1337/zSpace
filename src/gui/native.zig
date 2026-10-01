@@ -66,6 +66,7 @@ fn onProgressMain(raw: ?*anyopaque) callconv(.c) void {
 fn onCompleteMain(raw: ?*anyopaque) callconv(.c) void {
     const ctx: *ScanContext = @ptrCast(@alignCast(raw orelse return));
     if (!ctx.active.load(.acquire)) return;
+    defer ctx.active.store(false, .release);
     ctx.completed.store(true, .release);
 
     const root = ctx.worker.result orelse return;
@@ -96,6 +97,7 @@ fn onCompleteMain(raw: ?*anyopaque) callconv(.c) void {
 fn onErrorMain(raw: ?*anyopaque) callconv(.c) void {
     const ctx: *ScanContext = @ptrCast(@alignCast(raw orelse return));
     if (!ctx.active.load(.acquire)) return;
+    defer ctx.active.store(false, .release);
     ctx.completed.store(true, .release);
     ctx.ui_state.scan_state = .failed;
 
@@ -128,19 +130,26 @@ var global_monitor_thread: ?std.Thread = null;
 
 pub fn triggerScan() void {
     const ctx = global_scan_ctx orelse return;
-    if (ctx.scanner.is_scanning.load(.acquire)) {
+    if (ctx.scanner.is_scanning.load(.acquire) or ctx.active.load(.acquire)) {
         std.debug.print("[zSpace Native] Scan already in progress, ignoring trigger.\n", .{});
+        ctx.ui_state.status_text = "Scan in progress or stopping; please wait...";
+        components.requestRedraw();
         return;
     }
+
+    // Set guard immediately before any thread joins or spawns
+    ctx.active.store(true, .release);
 
     if (global_monitor_thread) |t| {
         t.join();
         global_monitor_thread = null;
     }
 
+    // Clear stale references into previous scan's arena before background worker resets it
+    ctx.ui_state.clearTreeReferences();
+
     ctx.target_path = ctx.ui_state.getTargetPath();
     ctx.completed.store(false, .release);
-    ctx.active.store(true, .release);
     ctx.ui_state.scan_state = .scanning;
     ctx.ui_state.status_text = "Starting scan...";
     components.requestRedraw();
@@ -149,6 +158,7 @@ pub fn triggerScan() void {
 
     ctx.scanner.scanBackground(ctx.target_path, &ctx.worker) catch |err| {
         std.debug.print("Failed to start background scan: {}\n", .{err});
+        ctx.active.store(false, .release);
         ctx.ui_state.scan_state = .failed;
         ctx.ui_state.status_text = "Failed to launch scan";
         components.requestRedraw();
@@ -157,6 +167,7 @@ pub fn triggerScan() void {
 
     global_monitor_thread = std.Thread.spawn(.{}, monitorScanLoop, .{ctx}) catch |err| {
         std.debug.print("Failed to spawn monitor thread: {}\n", .{err});
+        ctx.active.store(false, .release);
         ctx.ui_state.scan_state = .failed;
         ctx.ui_state.status_text = "Failed to spawn monitor thread";
         components.requestRedraw();

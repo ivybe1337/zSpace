@@ -11,6 +11,11 @@ const c = @cImport({
     @cInclude("errno.h");
 });
 
+extern "c" fn __error() *c_int;
+fn errnoValue() c_int {
+    return __error().*;
+}
+
 pub const SNAP_MAGIC = "# ZSNP3";
 const LEGACY_MAGIC = "# ZSNP2";
 const MAX_SNAPSHOT_BYTES: usize = 1 << 31;
@@ -44,6 +49,10 @@ pub const SnapshotEngine = struct {
     }
 
     pub fn saveSnapshot(self: *SnapshotEngine, root: *const types.DiskNode, dest_file_path: []const u8) !void {
+        return self.saveSnapshotEx(root, dest_file_path, true);
+    }
+
+    pub fn saveSnapshotEx(self: *SnapshotEngine, root: *const types.DiskNode, dest_file_path: []const u8, overwrite: bool) !void {
         var temp_path: [4096]u8 = undefined;
         const template = try std.fmt.bufPrint(&temp_path, "{s}.tmp.XXXXXX", .{dest_file_path});
         if (template.len >= temp_path.len - 1) return error.PathTooLong;
@@ -92,7 +101,19 @@ pub const SnapshotEngine = struct {
         if (dest_file_path.len >= dest_z.len - 1) return error.PathTooLong;
         @memcpy(dest_z[0..dest_file_path.len], dest_file_path);
         dest_z[dest_file_path.len] = 0;
-        if (c.rename(@ptrCast(&temp_path), @ptrCast(&dest_z)) != 0) return error.SnapshotPublishFailed;
+
+        if (overwrite) {
+            if (c.rename(@ptrCast(&temp_path), @ptrCast(&dest_z)) != 0) return error.SnapshotPublishFailed;
+        } else {
+            // Atomic no-replace creation: link(2) fails with EEXIST if dest already exists
+            if (c.link(@ptrCast(&temp_path), @ptrCast(&dest_z)) != 0) {
+                if (errnoValue() == c.EEXIST) {
+                    return error.DestinationExists;
+                }
+                return error.SnapshotPublishFailed;
+            }
+            _ = c.unlink(@ptrCast(&temp_path));
+        }
         published = true;
 
         // Make the rename durable when the containing directory can be opened.

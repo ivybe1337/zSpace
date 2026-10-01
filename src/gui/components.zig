@@ -94,12 +94,33 @@ pub const UIState = struct {
     journal_scroll_y: f64 = 0.0,
     journal_records: ?std.ArrayList(types.CleanOperation) = null,
     snapshot_status: []const u8 = "Ready",
+    status_buf: [256]u8 = [_]u8{0} ** 256,
+    is_dedup_analyzing: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) UIState {
         return .{
             .allocator = allocator,
             .selected_indices = std.AutoHashMap(usize, bool).init(allocator),
         };
+    }
+
+    pub fn setStatusFormatted(self: *UIState, comptime fmt: []const u8, args: anytype) void {
+        if (std.fmt.bufPrint(&self.status_buf, fmt, args)) |s| {
+            self.status_text = s;
+        } else |_| {
+            self.status_text = "Status update ready";
+        }
+    }
+
+    pub fn clearTreeReferences(self: *UIState) void {
+        self.root_node = null;
+        self.drill_node = null;
+        self.selected_node = null;
+        self.hovered_node = null;
+        self.hovered_row = null;
+        self.selected_indices.clearRetainingCapacity();
+        self.clearDedup();
+        self.clearQuickWins();
     }
 
     pub fn deinit(self: *UIState) void {
@@ -999,7 +1020,7 @@ fn drawDedupStudio(ctx: cocoa.CGContextRef, bounds: cocoa.NSRect, state: *UIStat
         // Items inside cluster
         for (cluster.items.items, 0..) |it, it_idx| {
             const row_y = card_top - 34.0 - @as(f64, @floatFromInt(it_idx + 1)) * 32.0;
-            const is_orig = (it_idx == 0);
+            const is_orig = it.is_original;
 
             // Badge
             if (is_orig) {
@@ -1046,19 +1067,44 @@ fn onDedupStudioMouseDown(self: cocoa.id, click_point: cocoa.NSPoint, bounds: co
         click_point.y >= btn_y and click_point.y <= btn_y + btn_h)
     {
         var clones_done: usize = 0;
-        var bytes_saved: u64 = 0;
+        var already_shared: usize = 0;
+        var bytes_processed: u64 = 0;
         for (clusters_opt.items) |cluster| {
             if (cluster.items.items.len < 2) continue;
-            const orig = cluster.items.items[0];
-            for (cluster.items.items[1..]) |dup| {
+            var orig_opt: ?types.DuplicateItem = null;
+            for (cluster.items.items) |c_it| {
+                if (c_it.is_original) {
+                    orig_opt = c_it;
+                    break;
+                }
+            }
+            const orig = orig_opt orelse cluster.items.items[0];
+            for (cluster.items.items) |dup| {
+                if (std.mem.eql(u8, dup.path, orig.path)) continue;
                 const res = apfs.ApfsEngine.cloneDeduplicate(orig.path, dup.path, cluster.size_each);
                 if (res.success) {
-                    clones_done += 1;
-                    bytes_saved += cluster.size_each;
+                    if (res.bytes_freed > 0) {
+                        clones_done += 1;
+                        bytes_processed += res.bytes_freed;
+                    } else {
+                        already_shared += 1;
+                    }
                 }
             }
         }
-        state.status_text = "APFS CoW Batch: Cloned duplicates, reclaimed physical space";
+        if (clones_done > 0 or already_shared > 0) {
+            var sz_b: [32]u8 = undefined;
+            const sz_s = types.DiskNode.formatSize(bytes_processed, &sz_b);
+            if (already_shared > 0 and clones_done == 0) {
+                state.setStatusFormatted("APFS CoW Batch: All {d} items already share identical APFS extents (no-op)", .{already_shared});
+            } else if (already_shared > 0) {
+                state.setStatusFormatted("APFS CoW Batch: Cloned {d} files ({s} logical processed, extents shared; {d} were already shared)", .{ clones_done, sz_s, already_shared });
+            } else {
+                state.setStatusFormatted("APFS CoW Batch: Cloned {d} files ({s} logical processed, extents shared)", .{ clones_done, sz_s });
+            }
+        } else {
+            state.status_text = "APFS CoW Batch: No duplicate pairs could be cloned (cross-volume or permissions)";
+        }
         cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
         requestRedraw();
         return;
@@ -1075,10 +1121,17 @@ fn onDedupStudioMouseDown(self: cocoa.id, click_point: cocoa.NSPoint, bounds: co
         if (click_point.y > card_top or click_point.y < card_top - c_card_h) continue;
 
         if (cluster.items.items.len < 2) continue;
-        const orig = cluster.items.items[0];
+        var orig_opt: ?types.DuplicateItem = null;
+        for (cluster.items.items) |c_it| {
+            if (c_it.is_original) {
+                orig_opt = c_it;
+                break;
+            }
+        }
+        const orig = orig_opt orelse cluster.items.items[0];
 
         for (cluster.items.items, 0..) |it, it_idx| {
-            if (it_idx == 0) continue;
+            if (std.mem.eql(u8, it.path, orig.path)) continue;
             const row_y = card_top - 34.0 - @as(f64, @floatFromInt(it_idx + 1)) * 32.0;
             if (click_point.y < row_y + 3.0 or click_point.y > row_y + 27.0) continue;
 
@@ -1088,9 +1141,15 @@ fn onDedupStudioMouseDown(self: cocoa.id, click_point: cocoa.NSPoint, bounds: co
                 // CoW Clone clicked
                 const res = apfs.ApfsEngine.cloneDeduplicate(orig.path, it.path, cluster.size_each);
                 if (res.success) {
-                    state.status_text = "Item deduplicated via APFS CoW clone (100% space saved, zero file loss)";
+                    var sz_b: [32]u8 = undefined;
+                    const sz_s = types.DiskNode.formatSize(cluster.size_each, &sz_b);
+                    if (res.bytes_freed > 0) {
+                        state.setStatusFormatted("Deduplicated via APFS CoW clone: {s} processed (extents shared, zero file loss)", .{sz_s});
+                    } else {
+                        state.setStatusFormatted("Already deduplicated: {s} already shares identical APFS extents", .{sz_s});
+                    }
                 } else {
-                    state.status_text = "APFS CoW clone failed (cross-device or read-only)";
+                    state.status_text = "APFS CoW clone failed (cross-volume, content mismatch, or permission error)";
                 }
                 cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
                 requestRedraw();
@@ -1245,9 +1304,7 @@ fn onQuickWinsMouseDown(self: cocoa.id, click_point: cocoa.NSPoint, bounds: coco
         }
         var sz_b: [32]u8 = undefined;
         const sz_s = types.DiskNode.formatSize(reclaimed, &sz_b);
-        var msg_buf: [128]u8 = undefined;
-        const msg = std.fmt.bufPrint(&msg_buf, "Reclaimed {s} of zero-risk caches into Trash (reversible)", .{sz_s}) catch "Reclaimed zero-risk caches";
-        state.status_text = msg;
+        state.setStatusFormatted("Reclaimed {s} of zero-risk caches into Trash (reversible)", .{sz_s});
         state.refreshQuickWins();
         cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
         requestRedraw();

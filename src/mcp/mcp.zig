@@ -255,9 +255,8 @@ const TOOLS_JSON =
     \\{"name":"clean_apply","description":"Move the selected candidates to the macOS Trash and return a receipt for each. DESTRUCTIVE: requires allow_write=true. Pass dry_run=true to preview.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Directory the ids were proposed from."},"select":{"type":"string","description":"Selection spec: \"3\" | \"3,7,12\" | \"3-7\" | \"safe\" | \"all\" | \"none\"."},"allow_write":{"type":"boolean","description":"Must be true or the call is refused."},"dry_run":{"type":"boolean","description":"Preview only; default false."},"limit":{"type":"integer","description":"Must match the limit used for clean_propose (default 50)."}},"required":["path","select","allow_write"]}},
     \\{"name":"history","description":"Return recent trash journal entries as raw JSON objects, newest last. Read-only.","inputSchema":{"type":"object","properties":{"limit":{"type":"integer","description":"Maximum entries (default 50, max 1000)."}}}},
     \\{"name":"undo","description":"Restore a trashed item by receipt id and verify its Blake3 digest. DESTRUCTIVE: requires allow_write=true.","inputSchema":{"type":"object","properties":{"receipt":{"type":"string","description":"Receipt id from clean_apply or history."},"allow_write":{"type":"boolean","description":"Must be true or the call is refused."}},"required":["receipt","allow_write"]}},
-    \\{"name":"snapshot_save","description":"Write a ZSNP2 snapshot of a tree (per-file Blake3 + mtime) for later diffing.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Directory to snapshot."},"output":{"type":"string","description":"Destination .zsnap file path."}},"required":["path","output"]}},
-    \\{"name":"snapshot_diff","description":"Diff two snapshots, reporting added/removed/grew/shrunk paths with byte deltas, largest first. Read-only.","inputSchema":{"type":"object","properties":{"a":{"type":"string","description":"Earlier .zsnap file."},"b":{"type":"string","description":"Later .zsnap file."}},"required":["a","b"]}}
-    \\,{"name":"index_status","description":"Inspect the local optional index cache without creating it.","inputSchema":{"type":"object","properties":{}}}
+    \\{"name":"snapshot","description":"Take or diff ZSNP3 snapshots of directory trees (per-file Blake3 + mtime). Action is 'save' (requires allow_write=true) or 'diff'.","inputSchema":{"type":"object","properties":{"action":{"type":"string","description":"'save' or 'diff'"},"path":{"type":"string","description":"Directory to snapshot (for save)"},"output_path":{"type":"string","description":"Destination .zsnap file path (for save)"},"snapshot_a":{"type":"string","description":"Earlier .zsnap file (for diff)"},"snapshot_b":{"type":"string","description":"Later .zsnap file (for diff)"},"allow_write":{"type":"boolean","description":"Required true for action='save'"},"overwrite":{"type":"boolean","description":"Overwrite existing destination file (default false)"}},"required":["action"]}},
+    \\{"name":"index_status","description":"Inspect the local optional index cache without creating it.","inputSchema":{"type":"object","properties":{}}}
     \\]}
 ;
 
@@ -621,19 +620,27 @@ fn toolUndo(arena: std.mem.Allocator, args: ?std.json.Value, buf: *std.ArrayList
     return ok(w.list.items);
 }
 
-fn toolSnapshot(arena: std.mem.Allocator, args: ?std.json.Value, buf: *std.ArrayList(u8)) !ToolOutcome {
-    const action = argString(args, "action") orelse "diff";
+fn toolSnapshot(arena: std.mem.Allocator, args: ?std.json.Value, buf: *std.ArrayList(u8), default_action: ?[]const u8) !ToolOutcome {
+    const action = argString(args, "action") orelse (default_action orelse "diff");
     var engine = snapshot_mod.SnapshotEngine.init(arena);
 
     if (std.mem.eql(u8, action, "save")) {
+        try requireWrite(args);
         const path = try requireString(args, "path");
-        const out_path = try requireString(args, "output_path");
+        const out_path = (argString(args, "output_path") orelse argString(args, "output")) orelse return fail("output_path is required");
+
+        const overwrite = argBoolOr(args, "overwrite", false);
 
         var sc = scanner.Scanner.init(arena, .{});
         defer sc.deinit();
         const root = sc.scan(path) catch |err| return fail(@errorName(err));
 
-        engine.saveSnapshot(root, out_path) catch |err| return fail(@errorName(err));
+        engine.saveSnapshotEx(root, out_path, overwrite) catch |err| {
+            if (err == error.DestinationExists) {
+                return fail("output_path already exists; pass overwrite: true to replace");
+            }
+            return fail(@errorName(err));
+        };
 
         var w = beginJsonObject(arena, buf);
         try w.writeAll("{\"status\":\"saved\",\"snapshot_file\":");
@@ -641,8 +648,8 @@ fn toolSnapshot(arena: std.mem.Allocator, args: ?std.json.Value, buf: *std.Array
         try w.writeAll("}");
         return ok(w.list.items);
     } else if (std.mem.eql(u8, action, "diff")) {
-        const snap_a = try requireString(args, "snapshot_a");
-        const snap_b = try requireString(args, "snapshot_b");
+        const snap_a = (argString(args, "snapshot_a") orelse argString(args, "a")) orelse return fail("snapshot_a is required");
+        const snap_b = (argString(args, "snapshot_b") orelse argString(args, "b")) orelse return fail("snapshot_b is required");
 
         var diffs = engine.compareSnapshots(snap_a, snap_b) catch |err| return fail(@errorName(err));
         defer diffs.deinit(arena);
@@ -685,109 +692,6 @@ fn toolIndexStatus(arena: std.mem.Allocator, _: ?std.json.Value, buf: *std.Array
     return ok(w.list.items);
 }
 
-// --- Tools List & Handshake -------------------------------------------------
-
-const TOOLS_MANIFEST =
-    \\[
-    \\  {
-    \\    "name": "scan",
-    \\    "description": "Perform high-speed disk directory traversal and category analysis.",
-    \\    "inputSchema": {
-    \\      "type": "object",
-    \\      "properties": {
-    \\        "path": {"type": "string", "description": "Root filesystem path to scan"},
-    \\        "depth": {"type": "integer", "description": "Maximum tree depth to report (default: 4)"},
-    \\        "min_size": {"type": "integer", "description": "Size threshold in bytes"}
-    \\      },
-    \\      "required": ["path"]
-    \\    }
-    \\  },
-    \\  {
-    \\    "name": "drives",
-    \\    "description": "Map all local drives, APFS containers, volume free space and SIP status.",
-    \\    "inputSchema": {"type": "object", "properties": {}}
-    \\  },
-    \\  {
-    \\    "name": "dedup",
-    \\    "description": "Find duplicate files using 3-stage sparse and Blake3 streaming hash.",
-    \\    "inputSchema": {
-    \\      "type": "object",
-    \\      "properties": {
-    \\        "path": {"type": "string", "description": "Directory to search for duplicates"},
-    \\        "min_size": {"type": "integer", "description": "Minimum file size to consider (default: 4096)"}
-    \\      },
-    \\      "required": ["path"]
-    \\    }
-    \\  },
-    \\  {
-    \\    "name": "clean_propose",
-    \\    "description": "Analyze stale build artifacts and caches, returning safe-to-delete proposals.",
-    \\    "inputSchema": {
-    \\      "type": "object",
-    \\      "properties": {
-    \\        "path": {"type": "string", "description": "Target path to inspect"}
-    \\      },
-    \\      "required": ["path"]
-    \\    }
-    \\  },
-    \\  {
-    \\    "name": "clean_apply",
-    \\    "description": "Move proposed cleanup candidates to macOS Trash with rollback receipts.",
-    \\    "inputSchema": {
-    \\      "type": "object",
-    \\      "properties": {
-    \\        "path": {"type": "string", "description": "Target path inspected by clean_propose"},
-    \\        "select": {"type": "string", "description": "Selection spec: 'safe', 'all', or indices like '1,2'"},
-    \\        "dry_run": {"type": "boolean", "description": "If true, simulate without moving files"},
-    \\        "allow_write": {"type": "boolean", "description": "Explicit confirmation required to mutate files"}
-    \\      },
-    \\      "required": ["path", "allow_write"]
-    \\    }
-    \\  },
-    \\  {
-    \\    "name": "history",
-    \\    "description": "Show recent operations journal with receipt IDs for rollback.",
-    \\    "inputSchema": {
-    \\      "type": "object",
-    \\      "properties": {
-    \\        "limit": {"type": "integer", "description": "Number of recent operations (default: 20)"}
-    \\      }
-    \\    }
-    \\  },
-    \\  {
-    \\    "name": "undo",
-    \\    "description": "Restore a previously trashed file by its receipt ID.",
-    \\    "inputSchema": {
-    \\      "type": "object",
-    \\      "properties": {
-    \\        "receipt": {"type": "string", "description": "Receipt ID from clean_apply or history"},
-    \\        "allow_write": {"type": "boolean", "description": "Explicit confirmation required to restore"}
-    \\      },
-    \\      "required": ["receipt", "allow_write"]
-    \\    }
-    \\  },
-    \\  {
-    \\    "name": "snapshot",
-    \\    "description": "Save a disk snapshot or compute differences between two snapshots.",
-    \\    "inputSchema": {
-    \\      "type": "object",
-    \\      "properties": {
-    \\        "action": {"type": "string", "enum": ["save", "diff"]},
-    \\        "path": {"type": "string", "description": "Path to scan when action='save'"},
-    \\        "output_path": {"type": "string", "description": "Target snapshot file path"},
-    \\        "snapshot_a": {"type": "string", "description": "Baseline snapshot for diff"},
-    \\        "snapshot_b": {"type": "string", "description": "Comparison snapshot for diff"}
-    \\      },
-    \\      "required": ["action"]
-    \\    }
-    \\  },
-    \\  {
-    \\    "name": "index_status",
-    \\    "description": "Inspect the status of the local zSpace background index cache.",
-    \\    "inputSchema": {"type": "object", "properties": {}}
-    \\  }
-    \\]
-;
 
 // --- Dispatcher & Main Stdio Server Loop -----------------------------------
 
@@ -874,11 +778,15 @@ pub fn runServer(allocator: std.mem.Allocator) !void {
             } else if (std.mem.eql(u8, tool_name, "undo")) {
                 outcome = toolUndo(arena, arguments, &tool_buf) catch |err| fail(@errorName(err));
             } else if (std.mem.eql(u8, tool_name, "snapshot")) {
-                outcome = toolSnapshot(arena, arguments, &tool_buf) catch |err| fail(@errorName(err));
+                outcome = toolSnapshot(arena, arguments, &tool_buf, null) catch |err| fail(@errorName(err));
+            } else if (std.mem.eql(u8, tool_name, "snapshot_save")) {
+                outcome = toolSnapshot(arena, arguments, &tool_buf, "save") catch |err| fail(@errorName(err));
+            } else if (std.mem.eql(u8, tool_name, "snapshot_diff")) {
+                outcome = toolSnapshot(arena, arguments, &tool_buf, "diff") catch |err| fail(@errorName(err));
             } else if (std.mem.eql(u8, tool_name, "index_status")) {
                 outcome = toolIndexStatus(arena, arguments, &tool_buf) catch |err| fail(@errorName(err));
             } else {
-                sendError(allocator, &out_buf, id_val, METHOD_NOT_FOUND, "unknown tool name");
+                sendError(allocator, &out_buf, id_val, INVALID_PARAMS, "unknown tool name");
                 continue;
             }
 

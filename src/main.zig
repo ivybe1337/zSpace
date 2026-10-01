@@ -673,7 +673,7 @@ test "Phase 2: Dedup Studio and Quick-Wins Sweeper engine integration" {
 
     var derived = types.DiskNode{
         .name = "DerivedData",
-        .path = "/mock/root/DerivedData",
+        .path = "/mock/Library/Developer/Xcode/DerivedData",
         .kind = .directory,
         .size_bytes = 25 * 1024 * 1024,
         .protection = .None,

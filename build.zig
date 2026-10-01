@@ -45,6 +45,7 @@ pub fn build(b: *std.Build) void {
     const bundle_step = b.step("bundle", "Assemble macOS zSpace.app bundle in zig-out/zSpace.app");
     const bundle_cmd = b.addSystemCommand(&.{
         "sh", "-c",
+        \\set -eu
         \\mkdir -p zig-out/zSpace.app/Contents/MacOS zig-out/zSpace.app/Contents/Resources
         \\cp zig-out/bin/zspace zig-out/zSpace.app/Contents/MacOS/zSpace
         \\cp dist/zSpace.app/Contents/Info.plist zig-out/zSpace.app/Contents/Info.plist
@@ -58,16 +59,20 @@ pub fn build(b: *std.Build) void {
     const install_app_step = b.step("install-app", "Install zSpace.app into /Applications and ~/Applications");
     const install_app_cmd = b.addSystemCommand(&.{
         "sh", "-c",
-        \\mkdir -p /Users/joshua/Applications/zSpace.app/Contents/MacOS /Users/joshua/Applications/zSpace.app/Contents/Resources
-        \\cp zig-out/bin/zspace /Users/joshua/Applications/zSpace.app/Contents/MacOS/zSpace
-        \\cp dist/zSpace.app/Contents/Info.plist /Users/joshua/Applications/zSpace.app/Contents/Info.plist
-        \\cp assets/AppIcon.icns /Users/joshua/Applications/zSpace.app/Contents/Resources/AppIcon.icns
-        \\codesign --force --deep --sign - /Users/joshua/Applications/zSpace.app
-        \\mkdir -p /Applications/zSpace.app/Contents/MacOS /Applications/zSpace.app/Contents/Resources 2>/dev/null || true
-        \\cp zig-out/bin/zspace /Applications/zSpace.app/Contents/MacOS/zSpace 2>/dev/null || true
-        \\cp dist/zSpace.app/Contents/Info.plist /Applications/zSpace.app/Contents/Info.plist 2>/dev/null || true
-        \\cp assets/AppIcon.icns /Applications/zSpace.app/Contents/Resources/AppIcon.icns 2>/dev/null || true
-        \\codesign --force --deep --sign - /Applications/zSpace.app 2>/dev/null || true
+        \\set -eu
+        \\APPDIR="${HOME}/Applications/zSpace.app"
+        \\mkdir -p "${APPDIR}/Contents/MacOS" "${APPDIR}/Contents/Resources"
+        \\cp zig-out/bin/zspace "${APPDIR}/Contents/MacOS/zSpace"
+        \\cp dist/zSpace.app/Contents/Info.plist "${APPDIR}/Contents/Info.plist"
+        \\cp assets/AppIcon.icns "${APPDIR}/Contents/Resources/AppIcon.icns"
+        \\codesign --force --deep --sign - "${APPDIR}"
+        \\if [ -w /Applications ]; then
+        \\    mkdir -p /Applications/zSpace.app/Contents/MacOS /Applications/zSpace.app/Contents/Resources
+        \\    cp zig-out/bin/zspace /Applications/zSpace.app/Contents/MacOS/zSpace
+        \\    cp dist/zSpace.app/Contents/Info.plist /Applications/zSpace.app/Contents/Info.plist
+        \\    cp assets/AppIcon.icns /Applications/zSpace.app/Contents/Resources/AppIcon.icns
+        \\    codesign --force --deep --sign - /Applications/zSpace.app
+        \\fi
     });
     install_app_cmd.step.dependOn(b.getInstallStep());
     install_app_step.dependOn(&install_app_cmd.step);
