@@ -276,3 +276,18 @@ pub fn openFolderDialog(out_buf: []u8) ?[]const u8 {
     return null;
 }
 
+pub fn copyToClipboard(text: []const u8) void {
+    const NSPasteboard = objc_getClass("NSPasteboard");
+    if (NSPasteboard == null) return;
+    const sel_generalPasteboard = sel_registerName("generalPasteboard");
+    const pb = send0(NSPasteboard, sel_generalPasteboard);
+    if (pb == null) return;
+    const sel_clearContents = sel_registerName("clearContents");
+    _ = send0(pb, sel_clearContents);
+    const sel_setString = sel_registerName("setString:forType:");
+    const ns_str = nsString(text) orelse return;
+    const ns_type = nsString("public.utf8-plain-text") orelse return;
+    const F = *const fn (id, SEL, id, id) callconv(.c) bool;
+    _ = @as(F, @ptrCast(&objc_msgSend))(pb, sel_setString, ns_str, ns_type);
+}
+

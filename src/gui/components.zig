@@ -16,6 +16,30 @@ const tooltips = @import("tooltips.zig");
 
 pub const ActiveTab = enum { super_finder, dedup_studio, quick_wins, baremetal_editor, machine_telemetry, spacetime_visualizer, time_travel_snapshots, audit_journal };
 pub const ScanState = enum { idle, scanning, completed, partial, cancelled, failed };
+pub const SortColumn = enum { name, size, blocks, category, modified, inode };
+pub const SortDirection = enum { ascending, descending };
+
+pub fn sortDiskNodes(children: []*types.DiskNode, col: SortColumn, dir: SortDirection) void {
+    const Sorter = struct {
+        col: SortColumn,
+        dir: SortDirection,
+        pub fn lessThan(ctx: @This(), a: *types.DiskNode, b: *types.DiskNode) bool {
+            if (a.isDirectory() != b.isDirectory()) {
+                return a.isDirectory();
+            }
+            const is_less: bool = switch (ctx.col) {
+                .name => std.mem.lessThan(u8, a.name, b.name),
+                .size => a.size_bytes < b.size_bytes,
+                .blocks => a.allocated_bytes < b.allocated_bytes,
+                .category => @intFromEnum(a.category) < @intFromEnum(b.category),
+                .modified => a.mtime_ns < b.mtime_ns,
+                .inode => a.size_bytes < b.size_bytes,
+            };
+            return if (ctx.dir == .ascending) is_less else !is_less;
+        }
+    };
+    std.mem.sort(*types.DiskNode, children, Sorter{ .col = col, .dir = dir }, Sorter.lessThan);
+}
 
 pub const UIState = struct {
     allocator: std.mem.Allocator,
@@ -35,12 +59,19 @@ pub const UIState = struct {
     scan_trigger_fn: ?*const fn () void = null,
     choose_target_fn: ?*const fn () void = null,
     preset_select_fn: ?*const fn ([]const u8) void = null,
+    trash_node_fn: ?*const fn (*const types.DiskNode) void = null,
     volume_total_bytes: u64 = 0,
     volume_free_bytes: u64 = 0,
     volume_used_bytes: u64 = 0,
     volume_pct_used: f32 = 0.0,
     volume_name: [64]u8 = [_]u8{0} ** 64,
     volume_name_len: usize = 0,
+    sort_col: SortColumn = .size,
+    sort_dir: SortDirection = .descending,
+    scroll_offset_y: f64 = 0.0,
+    sidebar_scroll_offset_y: f64 = 0.0,
+    selected_node: ?*const types.DiskNode = null,
+    hovered_row: ?usize = null,
 
     pub fn init(allocator: std.mem.Allocator) UIState {
         return .{
@@ -67,6 +98,8 @@ pub const UIState = struct {
         self.scan_state = .idle;
         self.root_node = null;
         self.drill_node = null;
+        self.selected_node = null;
+        self.scroll_offset_y = 0.0;
         self.selected_indices.clearRetainingCapacity();
     }
 };
@@ -86,6 +119,7 @@ pub var view_header: cocoa.id = null;
 pub var view_status: cocoa.id = null;
 pub var view_sidebar: cocoa.id = null;
 pub var view_workspace_rail: cocoa.id = null;
+pub var view_stage: cocoa.id = null;
 pub var view_treemap: cocoa.id = null;
 pub var view_sunburst: cocoa.id = null;
 
@@ -95,6 +129,7 @@ pub fn requestRedraw() void {
     if (view_status) |v| cocoa.sendVoidBool(v, sel_setNeedsDisplay, true);
     if (view_sidebar) |v| cocoa.sendVoidBool(v, sel_setNeedsDisplay, true);
     if (view_workspace_rail) |v| cocoa.sendVoidBool(v, sel_setNeedsDisplay, true);
+    if (view_stage) |v| cocoa.sendVoidBool(v, sel_setNeedsDisplay, true);
     if (view_treemap) |v| cocoa.sendVoidBool(v, sel_setNeedsDisplay, true);
     if (view_sunburst) |v| cocoa.sendVoidBool(v, sel_setNeedsDisplay, true);
 }
@@ -104,6 +139,7 @@ pub fn requestRedraw() void {
 var sel_drawRect: cocoa.SEL = null;
 var sel_mouseDown: cocoa.SEL = null;
 var sel_rightMouseDown: cocoa.SEL = null;
+var sel_scrollWheel: cocoa.SEL = null;
 var sel_bounds: cocoa.SEL = null;
 var sel_setNeedsDisplay: cocoa.SEL = null;
 
@@ -112,6 +148,7 @@ fn ensureSelectors() void {
     sel_drawRect = cocoa.sel_registerName("drawRect:");
     sel_mouseDown = cocoa.sel_registerName("mouseDown:");
     sel_rightMouseDown = cocoa.sel_registerName("rightMouseDown:");
+    sel_scrollWheel = cocoa.sel_registerName("scrollWheel:");
     sel_bounds = cocoa.sel_registerName("bounds");
     sel_setNeedsDisplay = cocoa.sel_registerName("setNeedsDisplay:");
 }
