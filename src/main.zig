@@ -164,7 +164,7 @@ pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
     const raw = try init.minimal.args.toSlice(arena);
 
-    // Strip Finder -psn_* launch args so `open ZSpace.app` opens the GUI.
+    // Strip Finder -psn_* launch args so `open zSpace.app` opens the GUI.
     var filtered: std.ArrayList([]const u8) = .{ .items = &.{}, .capacity = 0 };
     defer filtered.deinit(arena);
     if (raw.len > 0) try filtered.append(arena, raw[0]);

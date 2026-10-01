@@ -31,7 +31,7 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    const run_step = b.step("run", "Run ZSpace");
+    const run_step = b.step("run", "Run zSpace");
     run_step.dependOn(&run_cmd.step);
 
     const test_exe = b.addTest(.{
@@ -42,32 +42,32 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_test.step);
 
     // G-13: App Bundle assembly step
-    const bundle_step = b.step("bundle", "Assemble macOS ZSpace.app bundle in zig-out/ZSpace.app");
+    const bundle_step = b.step("bundle", "Assemble macOS zSpace.app bundle in zig-out/zSpace.app");
     const bundle_cmd = b.addSystemCommand(&.{
         "sh", "-c",
-        \\mkdir -p zig-out/ZSpace.app/Contents/MacOS zig-out/ZSpace.app/Contents/Resources
-        \\cp zig-out/bin/zspace zig-out/ZSpace.app/Contents/MacOS/ZSpace
-        \\cp dist/ZSpace.app/Contents/Info.plist zig-out/ZSpace.app/Contents/Info.plist
-        \\cp assets/AppIcon.icns zig-out/ZSpace.app/Contents/Resources/AppIcon.icns
-        \\codesign --force --deep --sign - zig-out/ZSpace.app
+        \\mkdir -p zig-out/zSpace.app/Contents/MacOS zig-out/zSpace.app/Contents/Resources
+        \\cp zig-out/bin/zspace zig-out/zSpace.app/Contents/MacOS/zSpace
+        \\cp dist/zSpace.app/Contents/Info.plist zig-out/zSpace.app/Contents/Info.plist
+        \\cp assets/AppIcon.icns zig-out/zSpace.app/Contents/Resources/AppIcon.icns
+        \\codesign --force --deep --sign - zig-out/zSpace.app
     });
     bundle_cmd.step.dependOn(b.getInstallStep());
     bundle_step.dependOn(&bundle_cmd.step);
 
     // Install to ~/Applications and /Applications
-    const install_app_step = b.step("install-app", "Install ZSpace.app into /Applications and ~/Applications");
+    const install_app_step = b.step("install-app", "Install zSpace.app into /Applications and ~/Applications");
     const install_app_cmd = b.addSystemCommand(&.{
         "sh", "-c",
-        \\mkdir -p /Users/joshua/Applications/ZSpace.app/Contents/MacOS /Users/joshua/Applications/ZSpace.app/Contents/Resources
-        \\cp zig-out/bin/zspace /Users/joshua/Applications/ZSpace.app/Contents/MacOS/ZSpace
-        \\cp dist/ZSpace.app/Contents/Info.plist /Users/joshua/Applications/ZSpace.app/Contents/Info.plist
-        \\cp assets/AppIcon.icns /Users/joshua/Applications/ZSpace.app/Contents/Resources/AppIcon.icns
-        \\codesign --force --deep --sign - /Users/joshua/Applications/ZSpace.app
-        \\mkdir -p /Applications/ZSpace.app/Contents/MacOS /Applications/ZSpace.app/Contents/Resources 2>/dev/null || true
-        \\cp zig-out/bin/zspace /Applications/ZSpace.app/Contents/MacOS/ZSpace 2>/dev/null || true
-        \\cp dist/ZSpace.app/Contents/Info.plist /Applications/ZSpace.app/Contents/Info.plist 2>/dev/null || true
-        \\cp assets/AppIcon.icns /Applications/ZSpace.app/Contents/Resources/AppIcon.icns 2>/dev/null || true
-        \\codesign --force --deep --sign - /Applications/ZSpace.app 2>/dev/null || true
+        \\mkdir -p /Users/joshua/Applications/zSpace.app/Contents/MacOS /Users/joshua/Applications/zSpace.app/Contents/Resources
+        \\cp zig-out/bin/zspace /Users/joshua/Applications/zSpace.app/Contents/MacOS/zSpace
+        \\cp dist/zSpace.app/Contents/Info.plist /Users/joshua/Applications/zSpace.app/Contents/Info.plist
+        \\cp assets/AppIcon.icns /Users/joshua/Applications/zSpace.app/Contents/Resources/AppIcon.icns
+        \\codesign --force --deep --sign - /Users/joshua/Applications/zSpace.app
+        \\mkdir -p /Applications/zSpace.app/Contents/MacOS /Applications/zSpace.app/Contents/Resources 2>/dev/null || true
+        \\cp zig-out/bin/zspace /Applications/zSpace.app/Contents/MacOS/zSpace 2>/dev/null || true
+        \\cp dist/zSpace.app/Contents/Info.plist /Applications/zSpace.app/Contents/Info.plist 2>/dev/null || true
+        \\cp assets/AppIcon.icns /Applications/zSpace.app/Contents/Resources/AppIcon.icns 2>/dev/null || true
+        \\codesign --force --deep --sign - /Applications/zSpace.app 2>/dev/null || true
     });
     install_app_cmd.step.dependOn(b.getInstallStep());
     install_app_step.dependOn(&install_app_cmd.step);

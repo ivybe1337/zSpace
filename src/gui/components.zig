@@ -1,4 +1,4 @@
-//! components.zig — Native AppKit custom NSView subclasses and widgets for ZSpace.
+//! components.zig — Native AppKit custom NSView subclasses and widgets for zSpace.
 //!
 //! Written in pure Zig. Subclasses are dynamically constructed at runtime via the
 //! Objective-C runtime (objc_allocateClassPair, class_addMethod, objc_registerClassPair).
@@ -303,7 +303,7 @@ fn drawHeaderRect(self: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.c
     cocoa.CGContextStrokeEllipseInRect(ctx, cocoa.NSRect.init(15, bounds.h / 2.0 - 8.0, 16, 16));
 
     // Brand and Mode Title
-    cocoa.drawStringWithColor("ZSPACE  //  SPACETIME DISK INTELLIGENCE", 42, bounds.h / 2.0 - 7.0, 0.95, 0.96, 0.98, 1.0);
+    cocoa.drawStringWithColor("zSpace  //  SPACETIME DISK INTELLIGENCE", 42, bounds.h / 2.0 - 7.0, 0.95, 0.96, 0.98, 1.0);
 
     // Target Path badge (interactive)
     const target_path_str: []const u8 = state.getTargetPath();
@@ -1930,7 +1930,7 @@ fn drawSidebarRect(self: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.
         cocoa.drawStringWithColor("⌘O  —  Choose custom target folder", card_x + 16, sc_y + 88, 0.55, 0.60, 0.68, 1.0);
         cocoa.drawStringWithColor("⌘R  —  Run disk analysis", card_x + 16, sc_y + 68, 0.55, 0.60, 0.68, 1.0);
         cocoa.drawStringWithColor("⌘1..8 — Switch workspace tab", card_x + 16, sc_y + 48, 0.55, 0.60, 0.68, 1.0);
-        cocoa.drawStringWithColor("⌘Q  —  Quit ZSpace", card_x + 16, sc_y + 28, 0.55, 0.60, 0.68, 1.0);
+        cocoa.drawStringWithColor("⌘Q  —  Quit zSpace", card_x + 16, sc_y + 28, 0.55, 0.60, 0.68, 1.0);
         return;
     }
 
@@ -2343,43 +2343,43 @@ pub fn registerViewSubclasses() void {
     ensureSelectors();
     const NSView = cocoa.objc_getClass("NSView");
 
-    // 1. ZSpaceHeaderView
-    if (cocoa.objc_getClass("ZSpaceHeaderView") == null) {
-        const cls = cocoa.objc_allocateClassPair(NSView, "ZSpaceHeaderView", 0);
+    // 1. zSpaceHeaderView
+    if (cocoa.objc_getClass("zSpaceHeaderView") == null) {
+        const cls = cocoa.objc_allocateClassPair(NSView, "zSpaceHeaderView", 0);
         _ = cocoa.class_addMethod(cls, sel_drawRect, @ptrCast(&drawHeaderRect), "v@:{CGRect=dddd}");
         _ = cocoa.class_addMethod(cls, sel_mouseDown, @ptrCast(&onHeaderMouseDown), "v@:@");
         cocoa.objc_registerClassPair(cls);
     }
 
-    // 2. ZSpaceStageView (Main Stage)
-    if (cocoa.objc_getClass("ZSpaceStageView") == null) {
-        const cls = cocoa.objc_allocateClassPair(NSView, "ZSpaceStageView", 0);
+    // 2. zSpaceStageView (Main Stage)
+    if (cocoa.objc_getClass("zSpaceStageView") == null) {
+        const cls = cocoa.objc_allocateClassPair(NSView, "zSpaceStageView", 0);
         _ = cocoa.class_addMethod(cls, sel_drawRect, @ptrCast(&drawStageRect), "v@:{CGRect=dddd}");
         _ = cocoa.class_addMethod(cls, sel_mouseDown, @ptrCast(&onStageMouseDown), "v@:@");
         _ = cocoa.class_addMethod(cls, sel_scrollWheel, @ptrCast(&onStageScrollWheel), "v@:@");
         cocoa.objc_registerClassPair(cls);
     }
 
-    // 3. ZSpaceSidebarView (Inspector)
-    if (cocoa.objc_getClass("ZSpaceSidebarView") == null) {
-        const cls = cocoa.objc_allocateClassPair(NSView, "ZSpaceSidebarView", 0);
+    // 3. zSpaceSidebarView (Inspector)
+    if (cocoa.objc_getClass("zSpaceSidebarView") == null) {
+        const cls = cocoa.objc_allocateClassPair(NSView, "zSpaceSidebarView", 0);
         _ = cocoa.class_addMethod(cls, sel_drawRect, @ptrCast(&drawSidebarRect), "v@:{CGRect=dddd}");
         _ = cocoa.class_addMethod(cls, sel_mouseDown, @ptrCast(&onSidebarMouseDown), "v@:@");
         _ = cocoa.class_addMethod(cls, sel_scrollWheel, @ptrCast(&onSidebarScrollWheel), "v@:@");
         cocoa.objc_registerClassPair(cls);
     }
 
-    // 4. ZSpaceWorkspaceRailView
-    if (cocoa.objc_getClass("ZSpaceWorkspaceRailView") == null) {
-        const cls = cocoa.objc_allocateClassPair(NSView, "ZSpaceWorkspaceRailView", 0);
+    // 4. zSpaceWorkspaceRailView
+    if (cocoa.objc_getClass("zSpaceWorkspaceRailView") == null) {
+        const cls = cocoa.objc_allocateClassPair(NSView, "zSpaceWorkspaceRailView", 0);
         _ = cocoa.class_addMethod(cls, sel_drawRect, @ptrCast(&drawWorkspaceRailRect), "v@:{CGRect=dddd}");
         _ = cocoa.class_addMethod(cls, sel_mouseDown, @ptrCast(&onWorkspaceRailMouseDown), "v@:@");
         cocoa.objc_registerClassPair(cls);
     }
 
-    // 5. ZSpaceStatusView
-    if (cocoa.objc_getClass("ZSpaceStatusView") == null) {
-        const cls = cocoa.objc_allocateClassPair(NSView, "ZSpaceStatusView", 0);
+    // 5. zSpaceStatusView
+    if (cocoa.objc_getClass("zSpaceStatusView") == null) {
+        const cls = cocoa.objc_allocateClassPair(NSView, "zSpaceStatusView", 0);
         _ = cocoa.class_addMethod(cls, sel_drawRect, @ptrCast(&drawStatusRect), "v@:{CGRect=dddd}");
         cocoa.objc_registerClassPair(cls);
     }

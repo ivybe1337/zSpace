@@ -1,4 +1,4 @@
-//! native.zig — Pure-Zig Native AppKit GUI Harness for ZSpace.
+//! native.zig — Pure-Zig Native AppKit GUI Harness for zSpace.
 //!
 //! Replaces legacy WKWebView / HTML approach with 100% native Cocoa views.
 //! Rule D1: Zero HTML, zero JS, zero WebKit. Direct Darwin AppKit execution.
@@ -129,7 +129,7 @@ var global_monitor_thread: ?std.Thread = null;
 pub fn triggerScan() void {
     const ctx = global_scan_ctx orelse return;
     if (ctx.scanner.is_scanning.load(.acquire)) {
-        std.debug.print("[ZSpace Native] Scan already in progress, ignoring trigger.\n", .{});
+        std.debug.print("[zSpace Native] Scan already in progress, ignoring trigger.\n", .{});
         return;
     }
 
@@ -145,7 +145,7 @@ pub fn triggerScan() void {
     ctx.ui_state.status_text = "Starting scan...";
     components.requestRedraw();
 
-    std.debug.print("\x1b[1;36m[ZSpace Native]\x1b[0m Explicit scan triggered for: {s}\n", .{ctx.target_path});
+    std.debug.print("\x1b[1;36m[zSpace Native]\x1b[0m Explicit scan triggered for: {s}\n", .{ctx.target_path});
 
     ctx.scanner.scanBackground(ctx.target_path, &ctx.worker) catch |err| {
         std.debug.print("Failed to start background scan: {}\n", .{err});
@@ -167,7 +167,7 @@ pub fn triggerScan() void {
 pub fn triggerChooseTarget() void {
     const ctx = global_scan_ctx orelse return;
     if (ctx.scanner.is_scanning.load(.acquire)) {
-        std.debug.print("[ZSpace Native] Cannot change target while scan is running.\n", .{});
+        std.debug.print("[zSpace Native] Cannot change target while scan is running.\n", .{});
         return;
     }
 
@@ -177,7 +177,7 @@ pub fn triggerChooseTarget() void {
         ctx.target_path = ctx.ui_state.getTargetPath();
         ctx.ui_state.status_text = "Target selected — Click [ ▶ SCAN TARGET ] to begin analysis";
         components.requestRedraw();
-        std.debug.print("[ZSpace Native] Target changed to: {s}\n", .{chosen});
+        std.debug.print("[zSpace Native] Target changed to: {s}\n", .{chosen});
     }
 }
 
@@ -189,7 +189,7 @@ pub fn selectTargetPreset(preset: []const u8) void {
     ctx.target_path = ctx.ui_state.getTargetPath();
     ctx.ui_state.status_text = "Target selected — Click [ ▶ SCAN TARGET ] to begin analysis";
     components.requestRedraw();
-    std.debug.print("[ZSpace Native] Preset selected: {s}\n", .{preset});
+    std.debug.print("[zSpace Native] Preset selected: {s}\n", .{preset});
 }
 
 pub fn cancelActiveScan() void {
@@ -199,7 +199,7 @@ pub fn cancelActiveScan() void {
         ctx.ui_state.scan_state = .idle;
         ctx.ui_state.status_text = "Scan cancelled by user";
         components.requestRedraw();
-        std.debug.print("[ZSpace Native] Scan cancelled by user.\n", .{});
+        std.debug.print("[zSpace Native] Scan cancelled by user.\n", .{});
     }
 }
 
@@ -207,7 +207,7 @@ pub fn runGuiApp(allocator: std.mem.Allocator, target_path: []const u8) !void {
     const pool = cocoa.objc_autoreleasePoolPush();
     defer cocoa.objc_autoreleasePoolPop(pool);
 
-    std.debug.print("\n\x1b[1;36m[ZSpace Native AppKit]\x1b[0m Launching Pure-Zig GUI for: {s}\n", .{target_path});
+    std.debug.print("\n\x1b[1;36m[zSpace Native AppKit]\x1b[0m Launching Pure-Zig GUI for: {s}\n", .{target_path});
 
     // 1. Initialize UI State with initial placeholder node
     var ui_state = components.UIState.init(allocator);
@@ -312,7 +312,7 @@ pub fn runGuiApp(allocator: std.mem.Allocator, target_path: []const u8) !void {
         return;
     }
 
-    const title_str = cocoa.nsString("ZSpace — Spacetime Disk Intelligence (Pure Zig Native)");
+    const title_str = cocoa.nsString("zSpace — Spacetime Disk Intelligence (Pure Zig Native)");
     cocoa.sendVoid1(window, sel_setTitle, title_str);
     cocoa.sendVoidBool(window, sel_setTitlebarAppearsTransparent, true);
 
@@ -346,14 +346,14 @@ pub fn runGuiApp(allocator: std.mem.Allocator, target_path: []const u8) !void {
     const cur_h = if (root_bounds.h > 100.0) root_bounds.h else win_h;
 
     // Header (54px at top: y = cur_h - 54)
-    const HeaderCls = cocoa.objc_getClass("ZSpaceHeaderView");
+    const HeaderCls = cocoa.objc_getClass("zSpaceHeaderView");
     const header_alloc = cocoa.send0(HeaderCls, sel_alloc);
     const header_view = cocoa.sendInitRect(header_alloc, sel_initWithFrame, cocoa.NSRect.init(0, cur_h - 54, cur_w, 54));
     cocoa.sendVoidInt(header_view, sel_setAutoresizingMask, 2 | 8); // width resizable + stick to top (MinYMargin = 8)
     cocoa.sendVoid1(root_view, sel_addSubview, header_view);
 
     // Status Bar (32px at bottom: y = 0)
-    const StatusCls = cocoa.objc_getClass("ZSpaceStatusView");
+    const StatusCls = cocoa.objc_getClass("zSpaceStatusView");
     const status_alloc = cocoa.send0(StatusCls, sel_alloc);
     const status_view = cocoa.sendInitRect(status_alloc, sel_initWithFrame, cocoa.NSRect.init(0, 0, cur_w, 32));
     cocoa.sendVoidInt(status_view, sel_setAutoresizingMask, 2 | 32); // width resizable + stick to bottom (MaxYMargin = 32)
@@ -364,13 +364,13 @@ pub fn runGuiApp(allocator: std.mem.Allocator, target_path: []const u8) !void {
     const sidebar_w: f64 = 360.0;
     const content_h: f64 = cur_h - 54.0 - 32.0;
 
-    const RailCls = cocoa.objc_getClass("ZSpaceWorkspaceRailView");
+    const RailCls = cocoa.objc_getClass("zSpaceWorkspaceRailView");
     const rail_alloc = cocoa.send0(RailCls, sel_alloc);
     const rail_view = cocoa.sendInitRect(rail_alloc, sel_initWithFrame, cocoa.NSRect.init(0, 32, rail_w, content_h));
     cocoa.sendVoidInt(rail_view, sel_setAutoresizingMask, 16);
     cocoa.sendVoid1(root_view, sel_addSubview, rail_view);
 
-    const SidebarCls = cocoa.objc_getClass("ZSpaceSidebarView");
+    const SidebarCls = cocoa.objc_getClass("zSpaceSidebarView");
     const sidebar_alloc = cocoa.send0(SidebarCls, sel_alloc);
     const sidebar_view = cocoa.sendInitRect(sidebar_alloc, sel_initWithFrame, cocoa.NSRect.init(cur_w - sidebar_w, 32, sidebar_w, content_h));
     cocoa.sendVoidInt(sidebar_view, sel_setAutoresizingMask, 1 | 16); // min-x margin (stick to right) + height resizable
@@ -378,7 +378,7 @@ pub fn runGuiApp(allocator: std.mem.Allocator, target_path: []const u8) !void {
 
     // Main Stage View (spans the entire central area between rail and sidebar)
     const stage_w: f64 = cur_w - sidebar_w - rail_w;
-    const StageCls = cocoa.objc_getClass("ZSpaceStageView");
+    const StageCls = cocoa.objc_getClass("zSpaceStageView");
     const stage_alloc = cocoa.send0(StageCls, sel_alloc);
     const stage_view = cocoa.sendInitRect(stage_alloc, sel_initWithFrame, cocoa.NSRect.init(rail_w, 32, stage_w, content_h));
     cocoa.sendVoidInt(stage_view, sel_setAutoresizingMask, 2 | 16); // width + height resizable
@@ -406,7 +406,7 @@ pub fn runGuiApp(allocator: std.mem.Allocator, target_path: []const u8) !void {
 
     const sel_isVisible = cocoa.sel_registerName("isVisible");
     const is_vis = cocoa.send0(window, sel_isVisible);
-    std.debug.print("✓ ZSpace Native Cocoa Liquid Glass UI mounted (<50ms). isVisible={?*}\n", .{is_vis});
+    std.debug.print("✓ zSpace Native Cocoa Liquid Glass UI mounted (<50ms). isVisible={?*}\n", .{is_vis});
 
     // 8. Initialize Scanner Context in Pure-Idle Mode (Rule: Zero auto-indexing on launch)
     var sc = scanner.Scanner.init(allocator, .{});
@@ -503,9 +503,9 @@ fn setupMenuBar(app: cocoa.id) void {
     const sel_unhideAll = cocoa.sel_registerName("unhideAllApplications:");
     const sel_performClose = cocoa.sel_registerName("performClose:");
 
-    // 1. Register ZSpaceAppDelegate
-    if (cocoa.objc_getClass("ZSpaceAppDelegate") == null) {
-        const del_cls = cocoa.objc_allocateClassPair(NSObject, "ZSpaceAppDelegate", 0);
+    // 1. Register zSpaceAppDelegate
+    if (cocoa.objc_getClass("zSpaceAppDelegate") == null) {
+        const del_cls = cocoa.objc_allocateClassPair(NSObject, "zSpaceAppDelegate", 0);
         _ = cocoa.class_addMethod(del_cls, sel_chooseFolder, @ptrCast(&onMenuChooseFolder), "v@:@");
         _ = cocoa.class_addMethod(del_cls, sel_scanTarget, @ptrCast(&onMenuScanTarget), "v@:@");
         _ = cocoa.class_addMethod(del_cls, sel_cancelScan, @ptrCast(&onMenuCancelScan), "v@:@");
@@ -516,7 +516,7 @@ fn setupMenuBar(app: cocoa.id) void {
         _ = cocoa.class_addMethod(del_cls, sel_presetRoot, @ptrCast(&onMenuPresetRoot), "v@:@");
         cocoa.objc_registerClassPair(del_cls);
     }
-    const AppDelCls = cocoa.objc_getClass("ZSpaceAppDelegate");
+    const AppDelCls = cocoa.objc_getClass("zSpaceAppDelegate");
     const delegate = cocoa.send0(cocoa.send0(AppDelCls, sel_alloc), sel_init);
     cocoa.sendVoid1(app, cocoa.sel_registerName("setDelegate:"), delegate);
 
@@ -526,18 +526,18 @@ fn setupMenuBar(app: cocoa.id) void {
 
     const menubar = cocoa.send0(cocoa.send0(NSMenu, sel_alloc), sel_init);
 
-    // --- 1. ZSpace Application Menu ---
+    // --- 1. zSpace Application Menu ---
     const app_menu_item = cocoa.send0(cocoa.send0(NSMenuItem, sel_alloc), sel_init);
     const app_menu = @as(F_initMenu, @ptrCast(&cocoa.objc_msgSend))(
         cocoa.send0(NSMenu, sel_alloc),
         sel_initWithMenuTitle,
-        cocoa.nsString("ZSpace"),
+        cocoa.nsString("zSpace"),
     );
 
     const about_item = @as(F_initItem, @ptrCast(&cocoa.objc_msgSend))(
         cocoa.send0(NSMenuItem, sel_alloc),
         sel_initWithTitle,
-        cocoa.nsString("About ZSpace"),
+        cocoa.nsString("About zSpace"),
         cocoa.sel_registerName("orderFrontStandardAboutPanel:"),
         cocoa.nsString(""),
     );
@@ -547,7 +547,7 @@ fn setupMenuBar(app: cocoa.id) void {
     const hide_item = @as(F_initItem, @ptrCast(&cocoa.objc_msgSend))(
         cocoa.send0(NSMenuItem, sel_alloc),
         sel_initWithTitle,
-        cocoa.nsString("Hide ZSpace"),
+        cocoa.nsString("Hide zSpace"),
         sel_hide,
         cocoa.nsString("h"),
     );
@@ -575,7 +575,7 @@ fn setupMenuBar(app: cocoa.id) void {
     const quit_item = @as(F_initItem, @ptrCast(&cocoa.objc_msgSend))(
         cocoa.send0(NSMenuItem, sel_alloc),
         sel_initWithTitle,
-        cocoa.nsString("Quit ZSpace"),
+        cocoa.nsString("Quit zSpace"),
         sel_terminate,
         cocoa.nsString("q"),
     );

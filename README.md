@@ -1,6 +1,6 @@
 <div align="center">
 
-# ZSpace (SpaceTimeZ)
+# zSpace (SpaceTimeZ)
 
 ### Ultra-Low Overhead Spacetime Storage Intelligence & APFS-Aware Deduplication Engine
 
@@ -51,7 +51,7 @@ Measured on Apple Silicon (M-series, APFS NVMe SSD):
 
 ```
   ┌────────────────────────────────────────────────────────┐
-  │                      ZSpace CLI / REPL                 │
+  │                      zSpace CLI / REPL                 │
   └─────────────┬────────────────────────────┬─────────────┘
                 │                            │
   ┌─────────────▼──────────────┐ ┌───────────▼─────────────┐
@@ -60,7 +60,7 @@ Measured on Apple Silicon (M-series, APFS NVMe SSD):
   └─────────────┬──────────────┘ └───────────┬─────────────┘
                 │                            │
   ┌─────────────▼────────────────────────────▼─────────────┐
-  │                    ZSpace Core Engine                  │
+  │                    zSpace Core Engine                  │
   │  ┌───────────────┐ ┌───────────────┐ ┌──────────────┐  │
   │  │ POSIX Scanner │ │ APFS Cloner   │ │ 3-Tier Dedup │  │
   │  └───────────────┘ └───────────────┘ └──────────────┘  │
@@ -75,7 +75,7 @@ Measured on Apple Silicon (M-series, APFS NVMe SSD):
 ```
 
 ### Memory Model
-ZSpace uses chunked arena allocation for node trees. All directory entries are pinned contiguously in memory during analysis, eliminating heap fragmentation and pointer chasing. When an operation finishes, the arena recycles in a single sub-microsecond reset.
+zSpace uses chunked arena allocation for node trees. All directory entries are pinned contiguously in memory during analysis, eliminating heap fragmentation and pointer chasing. When an operation finishes, the arena recycles in a single sub-microsecond reset.
 
 ---
 
@@ -167,4 +167,4 @@ zspace benchmark .
 
 ## License
 
-ZSpace is released under the [MIT License](LICENSE). Copyright © 2026 Joshua.
+zSpace is released under the [MIT License](LICENSE). Copyright © 2026 Joshua.

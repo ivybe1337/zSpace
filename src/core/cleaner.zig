@@ -155,7 +155,7 @@ fn journalFilePath(allocator: std.mem.Allocator) ![]u8 {
     }
     const home_c = c.getenv("HOME");
     const home = if (home_c != null) std.mem.span(@as([*:0]const u8, @ptrCast(home_c))) else "/Users/joshua";
-    return try std.fs.path.join(allocator, &.{ home, "Library", "Application Support", "ZSpace", "journal.jsonl" });
+    return try std.fs.path.join(allocator, &.{ home, "Library", "Application Support", "zSpace", "journal.jsonl" });
 }
 
 fn ensureParentDir(path: []const u8) void {

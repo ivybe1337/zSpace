@@ -199,7 +199,7 @@ pub fn runCli(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     const opts = parsed.opts;
 
     // Bare launch (or Finder -psn-only launch): open GUI off-terminal,
-    // otherwise print help. This is the `open ZSpace.app` contract.
+    // otherwise print help. This is the `open zSpace.app` contract.
     if (parsed.command == null) {
         if (parsed.help_requested) {
             printHelp();
@@ -435,7 +435,7 @@ fn printVersion(opts: GlobalOpts) void {
     if (opts.format == .json) {
         out.printRaw("{\"name\":\"zspace\",\"version\":\"2.0.0\",\"engine\":\"zig-0.16-native\"}\n");
     } else {
-        out.printRaw("ZSpace v2.0.0 (Pure Zig 0.16 Native Edition)\n");
+        out.printRaw("zSpace v2.0.0 (Pure Zig 0.16 Native Edition)\n");
     }
 }
 
@@ -1151,7 +1151,7 @@ fn runGuiCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts) !
 
 fn runBenchmarkCmd(allocator: std.mem.Allocator, path: []const u8, opts: GlobalOpts) !void {
     _ = opts;
-    out.print("\n\x1b[1;35m[ZSpace Performance Benchmark]\x1b[0m Starting on: {s}\n", .{path});
+    out.print("\n\x1b[1;35m[zSpace Performance Benchmark]\x1b[0m Starting on: {s}\n", .{path});
 
     var sc = scanner.Scanner.init(allocator, .{});
     defer sc.deinit();

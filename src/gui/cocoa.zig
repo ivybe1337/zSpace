@@ -1,4 +1,4 @@
-//! cocoa.zig — Complete typed Objective-C runtime & AppKit/CoreGraphics bindings for ZSpace.
+//! cocoa.zig — Complete typed Objective-C runtime & AppKit/CoreGraphics bindings for zSpace.
 //!
 //! Rule C01: Variadic `objc_msgSend` direct calls are banned. Every call site casts
 //! to the exact function pointer signature. On arm64, structs like NSRect/CGRect are passed

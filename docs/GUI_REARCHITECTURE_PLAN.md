@@ -1,4 +1,4 @@
-# ZSpace GUI Re-architecture Plan — Pure-Zig Native AppKit
+# zSpace GUI Re-architecture Plan — Pure-Zig Native AppKit
 
 **Status:** Authoritative for all GUI work. Companion to `docs/MASTER_PLAN.md`.
 **Date:** 2026-09-22. **Toolchain:** Zig 0.16, macOS 12+ arm64/x86_64.
@@ -96,7 +96,7 @@ zspace gui <dir> [--flags...]
 
 ```
 +------------------------------------------------------------------+
-| HEADER 54px: jewel ZSpace | Spacetime Disk Intelligence | status |?|
+| HEADER 54px: jewel zSpace | Spacetime Disk Intelligence | status |?|
 +------------------------------------------------------------------+
 | TOOLBAR 44px: [Mode v] [Path............] [Browse] [Scan Now]    |
 |   threshold: [--o--] >=100MB   [Exclusions] [Dedup opts]        |

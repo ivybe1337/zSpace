@@ -1,4 +1,4 @@
-//! zspace-mcp — stdio Model Context Protocol server for ZSpace.
+//! zspace-mcp — stdio Model Context Protocol server for zSpace.
 //!
 //! Transport: newline-delimited JSON-RPC 2.0 over stdin/stdout, exactly as the
 //! MCP stdio spec requires. **stdout carries protocol frames only** — every
@@ -665,7 +665,7 @@ fn toolSnapshot(arena: std.mem.Allocator, args: ?std.json.Value, buf: *std.Array
 }
 
 fn toolIndexStatus(arena: std.mem.Allocator, _: ?std.json.Value, buf: *std.ArrayList(u8)) !ToolOutcome {
-    const cache_path = "/Users/joshua/Library/Caches/ZSpace/index.zsnap";
+    const cache_path = "/Users/joshua/Library/Caches/zSpace/index.zsnap";
     var exists = false;
     var size_bytes: u64 = 0;
 
@@ -783,7 +783,7 @@ const TOOLS_MANIFEST =
     \\  },
     \\  {
     \\    "name": "index_status",
-    \\    "description": "Inspect the status of the local ZSpace background index cache.",
+    \\    "description": "Inspect the status of the local zSpace background index cache.",
     \\    "inputSchema": {"type": "object", "properties": {}}
     \\  }
     \\]

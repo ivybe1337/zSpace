@@ -1,4 +1,4 @@
-# ZSpace — Unified Master Plan & Complete Engineering Specification (v3.0)
+# zSpace — Unified Master Plan & Complete Engineering Specification (v3.0)
 
 **The Canonical Source of Truth and Complete Reconciliation.**  
 Supersedes and reconciles:
@@ -12,7 +12,7 @@ Supersedes and reconciles:
 
 ## 1. Executive Summary & User Directives Parsing
 
-The user’s critique established clear product and UX requirements for ZSpace:
+The user’s critique established clear product and UX requirements for zSpace:
 1. **Visualization Must Be Opt-in, Not Mandatory First Screen**: Raw abstract visualizer blocks (treemap/sunburst) should not dominate the screen automatically upon launch. They belong in a dedicated, explicit **Spacetime Visualizer** tab.
 2. **Enhanced Developer File Viewer ("Super Finder")**: The primary browsing experience must be an enriched file explorer rendering developer-critical metadata that standard macOS Finder hides: Git status, iCloud sync status, inode counts, directory depth, aggregate tree weight, and temporal entropy.
 3. **Dedicated In-App Workspaces for Core Engine Capabilities**:
@@ -112,7 +112,7 @@ The application utilizes a **Left Navigation Rail + Main Stage + Right Inspector
 
 ```
 +---------------------------------------------------------------------------------------------------------+
-| [●][●][●]  ZSpace — Spacetime Disk Intelligence [HUD]        Target: [/Users/joshua]  [📁 CHOOSE] [▶ SCAN]|
+| [●][●][●]  zSpace — Spacetime Disk Intelligence [HUD]        Target: [/Users/joshua]  [📁 CHOOSE] [▶ SCAN]|
 +-----+---------------------------------------------------------------------+-----------------------------+
 | N   | MAIN STAGE (Context-Sensitive to Active Tab)                         | RIGHT INSPECTOR / PREVIEW   |
 | A   |                                                                     |                             |
@@ -243,6 +243,6 @@ Execution proceeds in structured phases with verified test gates:
 
 - **G-01 Toolchain**: Zig `0.16.0` verified.
 - **G-02 Clean Build**: `zig build` compiles with 0 errors and 0 warnings.
-- **G-03 Test Suite**: `zig build test --summary all` passes 13/13 unit tests.
+- **G-03 Test Suite**: `zig build test --summary all` passes 20/20 hermetic unit tests.
 - **G-18 GUI Responsiveness**: Window renders in <200ms with 0.0% idle CPU usage.
 - **G-19 Zero Auto-Indexing**: Zero background disk crawl until user commands a scan.

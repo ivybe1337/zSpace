@@ -70,7 +70,7 @@ pub const Repl = struct {
             if (input.len == 0) continue;
 
             if (std.mem.eql(u8, input, "exit") or std.mem.eql(u8, input, "quit") or std.mem.eql(u8, input, "q")) {
-                out.printRaw("\nExiting ZSpace REPL.\n");
+                out.printRaw("\nExiting zSpace REPL.\n");
                 break;
             }
 
