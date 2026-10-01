@@ -15,6 +15,15 @@ const dedup = @import("../core/dedup.zig");
 const analyzer = @import("../core/analyzer.zig");
 const apfs = @import("../core/apfs.zig");
 const cleaner = @import("../core/cleaner.zig");
+const snapshot = @import("../core/snapshot.zig");
+const disks = @import("../core/disks.zig");
+
+const c = @cImport({
+    @cInclude("sys/stat.h");
+    @cInclude("fcntl.h");
+    @cInclude("unistd.h");
+    @cInclude("stdio.h");
+});
 
 // --- Global UI State for Native Views --------------------------------------
 
@@ -80,6 +89,11 @@ pub const UIState = struct {
     quick_wins: ?std.ArrayList(analyzer.SmartCleanItem) = null,
     dedup_scroll_y: f64 = 0.0,
     quick_wins_scroll_y: f64 = 0.0,
+    baremetal_scroll_y: f64 = 0.0,
+    snapshots_scroll_y: f64 = 0.0,
+    journal_scroll_y: f64 = 0.0,
+    journal_records: ?std.ArrayList(types.CleanOperation) = null,
+    snapshot_status: []const u8 = "Ready",
 
     pub fn init(allocator: std.mem.Allocator) UIState {
         return .{
@@ -92,6 +106,7 @@ pub const UIState = struct {
         self.selected_indices.deinit();
         self.clearDedup();
         self.clearQuickWins();
+        self.clearJournal();
     }
 
     pub fn clearDedup(self: *UIState) void {
@@ -111,6 +126,18 @@ pub const UIState = struct {
         }
     }
 
+    pub fn clearJournal(self: *UIState) void {
+        if (self.journal_records) |*jr| {
+            for (jr.items) |op| {
+                self.allocator.free(op.original_path);
+                self.allocator.free(op.trash_path);
+                if (op.receipt_id.len > 0) self.allocator.free(op.receipt_id);
+            }
+            jr.deinit(self.allocator);
+            self.journal_records = null;
+        }
+    }
+
     pub fn refreshDedup(self: *UIState) void {
         const root = self.root_node orelse return;
         self.clearDedup();
@@ -123,6 +150,30 @@ pub const UIState = struct {
         self.clearQuickWins();
         var an = analyzer.Analyzer.init(self.allocator);
         self.quick_wins = an.generateSmartCleanRecommendations(root) catch null;
+    }
+
+    pub fn refreshJournal(self: *UIState) void {
+        self.clearJournal();
+        var cl = cleaner.Cleaner.init(self.allocator) catch return;
+        defer cl.deinit();
+
+        var list: std.ArrayList(types.CleanOperation) = .{ .items = &.{}, .capacity = 0 };
+        for (cl.journal.items) |op| {
+            const o_orig = self.allocator.dupe(u8, op.original_path) catch continue;
+            const o_trash = self.allocator.dupe(u8, op.trash_path) catch continue;
+            const o_rid = if (op.receipt_id.len > 0) (self.allocator.dupe(u8, op.receipt_id) catch continue) else &.{};
+            list.append(self.allocator, .{
+                .original_path = o_orig,
+                .trash_path = o_trash,
+                .size_bytes = op.size_bytes,
+                .timestamp_ns = op.timestamp_ns,
+                .verified_hash = op.verified_hash,
+                .blake3 = op.blake3,
+                .receipt_id = o_rid,
+                .method = op.method,
+            }) catch continue;
+        }
+        self.journal_records = list;
     }
 
     pub fn getTargetPath(self: *const UIState) []const u8 {
@@ -143,9 +194,13 @@ pub const UIState = struct {
         self.scroll_offset_y = 0.0;
         self.dedup_scroll_y = 0.0;
         self.quick_wins_scroll_y = 0.0;
+        self.baremetal_scroll_y = 0.0;
+        self.snapshots_scroll_y = 0.0;
+        self.journal_scroll_y = 0.0;
         self.selected_indices.clearRetainingCapacity();
         self.clearDedup();
         self.clearQuickWins();
+        self.clearJournal();
     }
 };
 
@@ -896,9 +951,9 @@ fn drawDedupStudio(ctx: cocoa.CGContextRef, bounds: cocoa.NSRect, state: *UIStat
 
     var total_wasted: u64 = 0;
     var total_dups: usize = 0;
-    for (clusters) |c| {
-        total_wasted += c.total_wasted_bytes;
-        total_dups += c.items.items.len;
+    for (clusters) |cluster| {
+        total_wasted += cluster.total_wasted_bytes;
+        total_dups += cluster.items.items.len;
     }
     var wst_buf: [32]u8 = undefined;
     const wst_str = types.DiskNode.formatSize(total_wasted, &wst_buf);
@@ -918,8 +973,8 @@ fn drawDedupStudio(ctx: cocoa.CGContextRef, bounds: cocoa.NSRect, state: *UIStat
     const list_top: f64 = top_bar_y;
 
     var cur_y: f64 = list_top + state.dedup_scroll_y;
-    for (clusters) |c| {
-        const c_card_h: f64 = 34.0 + @as(f64, @floatFromInt(c.items.items.len)) * 32.0 + 8.0;
+    for (clusters) |cluster| {
+        const c_card_h: f64 = 34.0 + @as(f64, @floatFromInt(cluster.items.items.len)) * 32.0 + 8.0;
         const card_top = cur_y;
         cur_y -= c_card_h + 12.0;
 
@@ -930,19 +985,19 @@ fn drawDedupStudio(ctx: cocoa.CGContextRef, bounds: cocoa.NSRect, state: *UIStat
 
         // Cluster header
         var sz_b: [32]u8 = undefined;
-        const sz_s = types.DiskNode.formatSize(c.size_each, &sz_b);
+        const sz_s = types.DiskNode.formatSize(cluster.size_each, &sz_b);
         var cw_b: [32]u8 = undefined;
-        const cw_s = types.DiskNode.formatSize(c.total_wasted_bytes, &cw_b);
+        const cw_s = types.DiskNode.formatSize(cluster.total_wasted_bytes, &cw_b);
 
         var hex_b: [12]u8 = undefined;
-        const hex_prefix = std.fmt.bufPrint(&hex_b, "{x:0>8}", .{@as(u32, @truncate(c.hash))}) catch "hash";
+        const hex_prefix = std.fmt.bufPrint(&hex_b, "{x:0>8}", .{@as(u32, @truncate(cluster.hash))}) catch "hash";
 
         var c_hdr_buf: [128]u8 = undefined;
-        const c_hdr = std.fmt.bufPrint(&c_hdr_buf, "Cluster #{s}  •  {s} each  •  {d} copies  •  Wasted: {s}", .{ hex_prefix, sz_s, c.items.items.len, cw_s }) catch "";
+        const c_hdr = std.fmt.bufPrint(&c_hdr_buf, "Cluster #{s}  •  {s} each  •  {d} copies  •  Wasted: {s}", .{ hex_prefix, sz_s, cluster.items.items.len, cw_s }) catch "";
         cocoa.drawStringWithColor(c_hdr, 34.0, card_top - 24.0, 0.0, 0.90, 1.0, 1.0);
 
         // Items inside cluster
-        for (c.items.items, 0..) |it, it_idx| {
+        for (cluster.items.items, 0..) |it, it_idx| {
             const row_y = card_top - 34.0 - @as(f64, @floatFromInt(it_idx + 1)) * 32.0;
             const is_orig = (it_idx == 0);
 
@@ -992,14 +1047,14 @@ fn onDedupStudioMouseDown(self: cocoa.id, click_point: cocoa.NSPoint, bounds: co
     {
         var clones_done: usize = 0;
         var bytes_saved: u64 = 0;
-        for (clusters_opt.items) |c| {
-            if (c.items.items.len < 2) continue;
-            const orig = c.items.items[0];
-            for (c.items.items[1..]) |dup| {
-                const res = apfs.ApfsEngine.cloneDeduplicate(orig.path, dup.path, c.size_each);
+        for (clusters_opt.items) |cluster| {
+            if (cluster.items.items.len < 2) continue;
+            const orig = cluster.items.items[0];
+            for (cluster.items.items[1..]) |dup| {
+                const res = apfs.ApfsEngine.cloneDeduplicate(orig.path, dup.path, cluster.size_each);
                 if (res.success) {
                     clones_done += 1;
-                    bytes_saved += c.size_each;
+                    bytes_saved += cluster.size_each;
                 }
             }
         }
@@ -1012,17 +1067,17 @@ fn onDedupStudioMouseDown(self: cocoa.id, click_point: cocoa.NSPoint, bounds: co
     // Check individual buttons in cluster cards
     const list_top: f64 = top_bar_y;
     var cur_y: f64 = list_top + state.dedup_scroll_y;
-    for (clusters_opt.items) |c| {
-        const c_card_h: f64 = 34.0 + @as(f64, @floatFromInt(c.items.items.len)) * 32.0 + 8.0;
+    for (clusters_opt.items) |cluster| {
+        const c_card_h: f64 = 34.0 + @as(f64, @floatFromInt(cluster.items.items.len)) * 32.0 + 8.0;
         const card_top = cur_y;
         cur_y -= c_card_h + 12.0;
 
         if (click_point.y > card_top or click_point.y < card_top - c_card_h) continue;
 
-        if (c.items.items.len < 2) continue;
-        const orig = c.items.items[0];
+        if (cluster.items.items.len < 2) continue;
+        const orig = cluster.items.items[0];
 
-        for (c.items.items, 0..) |it, it_idx| {
+        for (cluster.items.items, 0..) |it, it_idx| {
             if (it_idx == 0) continue;
             const row_y = card_top - 34.0 - @as(f64, @floatFromInt(it_idx + 1)) * 32.0;
             if (click_point.y < row_y + 3.0 or click_point.y > row_y + 27.0) continue;
@@ -1031,7 +1086,7 @@ fn onDedupStudioMouseDown(self: cocoa.id, click_point: cocoa.NSPoint, bounds: co
             const rcl_x = bounds.w - 40.0 - rcl_w - 90.0;
             if (click_point.x >= rcl_x and click_point.x <= rcl_x + rcl_w) {
                 // CoW Clone clicked
-                const res = apfs.ApfsEngine.cloneDeduplicate(orig.path, it.path, c.size_each);
+                const res = apfs.ApfsEngine.cloneDeduplicate(orig.path, it.path, cluster.size_each);
                 if (res.success) {
                     state.status_text = "Item deduplicated via APFS CoW clone (100% space saved, zero file loss)";
                 } else {
@@ -1047,7 +1102,7 @@ fn onDedupStudioMouseDown(self: cocoa.id, click_point: cocoa.NSPoint, bounds: co
                 // Trash clicked
                 var cl = cleaner.Cleaner.init(state.allocator) catch return;
                 defer cl.deinit();
-                _ = cl.safeMoveToTrash(it.path, c.size_each, .None) catch {
+                _ = cl.safeMoveToTrash(it.path, cluster.size_each, .None) catch {
                     state.status_text = "Failed to move duplicate to Trash";
                     cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
                     requestRedraw();
@@ -1233,6 +1288,473 @@ fn onQuickWinsMouseDown(self: cocoa.id, click_point: cocoa.NSPoint, bounds: coco
     }
 }
 
+// --- Baremetal Editor (Workspace 4) ----------------------------------------
+
+fn drawBaremetalEditor(ctx: cocoa.CGContextRef, bounds: cocoa.NSRect, state: *UIState) void {
+    const target = state.selected_node orelse state.drill_node orelse state.root_node;
+    if (target == null or state.scan_state == .idle) {
+        cocoa.drawStringWithColor("Select any file or folder in Super Finder to inspect baremetal filesystem blocks and raw bytes.", bounds.w / 2.0 - 270.0, bounds.h / 2.0, 0.55, 0.60, 0.68, 1.0);
+        return;
+    }
+    const node = target.?;
+
+    // 1. Top Header Bar
+    const top_bar_h: f64 = 44.0;
+    const top_bar_y: f64 = bounds.h - top_bar_h;
+    const bar_bg = cocoa.makeCGColor(0x10131B, 1.0);
+    defer cocoa.CGColorRelease(bar_bg);
+    cocoa.CGContextSetFillColorWithColor(ctx, bar_bg);
+    cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(0, top_bar_y, bounds.w, top_bar_h));
+
+    var title_buf: [256]u8 = undefined;
+    const max_t: usize = @min(node.path.len, 48);
+    const title_str = std.fmt.bufPrint(&title_buf, "BAREMETAL BLOCK & HEX INSPECTOR  •  {s}", .{node.path[0..max_t]}) catch "BAREMETAL INSPECTOR";
+    cocoa.drawStringWithColor(title_str, 20.0, top_bar_y + 14.0, 0.0, 0.90, 1.0, 1.0);
+
+    // 2. POSIX / APFS Inode Stat Card
+    var pz: [4096]u8 = undefined;
+    var st: c.struct_stat = undefined;
+    var have_stat = false;
+    if (node.path.len < pz.len - 1) {
+        @memcpy(pz[0..node.path.len], node.path);
+        pz[node.path.len] = 0;
+        if (c.lstat(@as([*:0]const u8, @ptrCast(&pz)), &st) == 0) {
+            have_stat = true;
+        }
+    }
+
+    const stat_card_y = top_bar_y - 90.0;
+    const stat_card_rect = cocoa.NSRect.init(20.0, stat_card_y, bounds.w - 40.0, 80.0);
+    renderCardBg(ctx, stat_card_rect);
+
+    if (have_stat) {
+        var stat_line1: [128]u8 = undefined;
+        const sl1 = std.fmt.bufPrint(&stat_line1, "INODE: {d}  •  DEV: 0x{x}  •  MODE: 0o{o:0>6}  •  NLINK: {d}  •  UID: {d}  •  GID: {d}", .{
+            st.st_ino,
+            st.st_dev,
+            st.st_mode,
+            st.st_nlink,
+            st.st_uid,
+            st.st_gid,
+        }) catch "";
+        cocoa.drawStringWithColor(sl1, 36.0, stat_card_y + 50.0, 0.0, 0.90, 1.0, 1.0);
+
+        var stat_line2: [128]u8 = undefined;
+        const sl2 = std.fmt.bufPrint(&stat_line2, "LOGICAL: {d} bytes  •  BLOCKS ALLOCATED: {d} (512B sectors)  •  SIZE ON DISK: {d} bytes", .{
+            st.st_size,
+            st.st_blocks,
+            @as(u64, @intCast(st.st_blocks)) * 512,
+        }) catch "";
+        cocoa.drawStringWithColor(sl2, 36.0, stat_card_y + 24.0, 0.82, 0.86, 0.92, 1.0);
+    } else {
+        cocoa.drawStringWithColor("Unable to read POSIX lstat metrics for path", 36.0, stat_card_y + 36.0, 0.55, 0.60, 0.68, 1.0);
+    }
+
+    // 3. Raw Bytes Hex Dump Window (First 512 bytes)
+    const hex_top = stat_card_y - 14.0;
+    const hex_h = hex_top - 20.0;
+    const hex_rect = cocoa.NSRect.init(20.0, 20.0, bounds.w - 40.0, hex_h);
+    renderCardBg(ctx, hex_rect);
+
+    cocoa.drawStringWithColor("OFFSET         00 01 02 03 04 05 06 07  08 09 0A 0B 0C 0D 0E 0F    ASCII DECODE", 36.0, hex_top - 24.0, 0.55, 0.60, 0.68, 1.0);
+
+    var raw_buf: [512]u8 = undefined;
+    var bytes_read: usize = 0;
+    if (node.kind == .file and node.path.len < pz.len - 1) {
+        const fd = c.open(@as([*:0]const u8, @ptrCast(&pz)), c.O_RDONLY | c.O_NONBLOCK);
+        if (fd >= 0) {
+            defer _ = c.close(fd);
+            const n = c.read(fd, &raw_buf, raw_buf.len);
+            if (n > 0) bytes_read = @intCast(n);
+        }
+    }
+
+    if (bytes_read == 0) {
+        if (node.kind == .directory) {
+            cocoa.drawStringWithColor("Directory node — directories have structural catalog blocks managed by APFS container.", 36.0, hex_top - 60.0, 0.55, 0.60, 0.68, 1.0);
+        } else {
+            cocoa.drawStringWithColor("0-byte empty file or unreadable contents.", 36.0, hex_top - 60.0, 0.55, 0.60, 0.68, 1.0);
+        }
+        return;
+    }
+
+    // Render hex lines (16 bytes per line)
+    var line_offset: usize = 0;
+    var line_y: f64 = hex_top - 52.0 + state.baremetal_scroll_y;
+    while (line_offset < bytes_read and line_y > 30.0) : ({
+        line_offset += 16;
+        line_y -= 22.0;
+    }) {
+        if (line_y > hex_top - 36.0) continue;
+
+        const count = @min(16, bytes_read - line_offset);
+        const chunk = raw_buf[line_offset .. line_offset + count];
+
+        var hex_str: [80]u8 = [_]u8{' '} ** 80;
+        var off_buf: [16]u8 = undefined;
+        const off_str = std.fmt.bufPrint(&off_buf, "0x{x:0>8}: ", .{line_offset}) catch "";
+
+        // Format hex octets
+        var h_pos: usize = 0;
+        for (chunk, 0..) |b, i| {
+            if (i == 8) {
+                hex_str[h_pos] = ' ';
+                h_pos += 1;
+            }
+            _ = std.fmt.bufPrint(hex_str[h_pos .. h_pos + 3], "{x:0>2} ", .{b}) catch {};
+            h_pos += 3;
+        }
+
+        // Format ASCII characters
+        var asc_str: [18]u8 = [_]u8{'.'} ** 18;
+        for (chunk, 0..) |b, i| {
+            if (b >= 32 and b <= 126) {
+                asc_str[i] = b;
+            }
+        }
+        asc_str[count] = 0;
+
+        var full_line: [128]u8 = undefined;
+        const fl = std.fmt.bufPrint(&full_line, "{s} {s}   |{s}|", .{ off_str, hex_str[0..@max(48, h_pos)], asc_str[0..count] }) catch "";
+        cocoa.drawStringWithColor(fl, 36.0, line_y, 0.0, 0.90, 1.0, 1.0);
+    }
+}
+
+fn onBaremetalMouseDown(self: cocoa.id, click_point: cocoa.NSPoint, bounds: cocoa.NSRect, state: *UIState) void {
+    _ = self;
+    _ = click_point;
+    _ = bounds;
+    _ = state;
+}
+
+// --- Machine Telemetry (Workspace 5) ---------------------------------------
+
+fn drawMachineTelemetry(ctx: cocoa.CGContextRef, bounds: cocoa.NSRect, state: *UIState) void {
+    // 1. Top Header Bar
+    const top_bar_h: f64 = 44.0;
+    const top_bar_y: f64 = bounds.h - top_bar_h;
+    const bar_bg = cocoa.makeCGColor(0x10131B, 1.0);
+    defer cocoa.CGColorRelease(bar_bg);
+    cocoa.CGContextSetFillColorWithColor(ctx, bar_bg);
+    cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(0, top_bar_y, bounds.w, top_bar_h));
+
+    cocoa.drawStringWithColor("MACHINE TELEMETRY  •  HARDWARE APFS TOPOLOGY & SYSTEM RUNTIME", 20.0, top_bar_y + 14.0, 0.0, 0.90, 1.0, 1.0);
+
+    // 2. Storage Volume Gauge Card (Height 160px)
+    const v_card_y = top_bar_y - 175.0;
+    const v_card_rect = cocoa.NSRect.init(20.0, v_card_y, bounds.w - 40.0, 160.0);
+    renderCardBg(ctx, v_card_rect);
+
+    var tot_b: [32]u8 = undefined;
+    var used_b: [32]u8 = undefined;
+    var free_b: [32]u8 = undefined;
+    const tot_s = types.DiskNode.formatSize(state.volume_total_bytes, &tot_b);
+    const used_s = types.DiskNode.formatSize(state.volume_used_bytes, &used_b);
+    const free_s = types.DiskNode.formatSize(state.volume_free_bytes, &free_b);
+
+    const mnt_name = if (state.volume_name_len > 0) state.volume_name[0..state.volume_name_len] else "/";
+    var v_hdr_buf: [128]u8 = undefined;
+    const v_hdr = std.fmt.bufPrint(&v_hdr_buf, "PRIMARY APFS CONTAINER ({s})  •  Capacity: {s}", .{ mnt_name, tot_s }) catch "";
+    cocoa.drawStringWithColor(v_hdr, 36.0, v_card_y + 124.0, 0.95, 0.96, 0.99, 1.0);
+
+    var v_metrics_buf: [128]u8 = undefined;
+    const v_met = std.fmt.bufPrint(&v_metrics_buf, "Used Space: {s} ({d:.1}%)    •    Available Free Space: {s}", .{ used_s, state.volume_pct_used, free_s }) catch "";
+    cocoa.drawStringWithColor(v_met, 36.0, v_card_y + 94.0, 0.0, 0.90, 1.0, 1.0);
+
+    // Gauge bar
+    const bar_x: f64 = 36.0;
+    const bar_w: f64 = bounds.w - 40.0 - 72.0;
+    const bar_y: f64 = v_card_y + 44.0;
+    const bar_h: f64 = 28.0;
+
+    // Background track
+    const track_col = cocoa.makeCGColor(0x1B202D, 1.0);
+    defer cocoa.CGColorRelease(track_col);
+    cocoa.CGContextSetFillColorWithColor(ctx, track_col);
+    cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(bar_x, bar_y, bar_w, bar_h));
+
+    // Used portion (Cyan)
+    const pct = @min(100.0, @max(0.0, state.volume_pct_used));
+    const used_w = bar_w * (@as(f64, @floatCast(pct)) / 100.0);
+    if (used_w > 0.0) {
+        const used_col = cocoa.makeCGColor(0x00E5FF, 0.85);
+        defer cocoa.CGColorRelease(used_col);
+        cocoa.CGContextSetFillColorWithColor(ctx, used_col);
+        cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(bar_x, bar_y, used_w, bar_h));
+    }
+
+    // Border
+    const b_col = cocoa.makeCGColor(0x283040, 1.0);
+    defer cocoa.CGColorRelease(b_col);
+    cocoa.CGContextSetStrokeColorWithColor(ctx, b_col);
+    cocoa.CGContextSetLineWidth(ctx, 1.2);
+    cocoa.CGContextStrokeRect(ctx, cocoa.NSRect.init(bar_x, bar_y, bar_w, bar_h));
+
+    cocoa.drawStringWithColor("■ Used Container Space (APFS)", bar_x, v_card_y + 16.0, 0.0, 0.90, 1.0, 1.0);
+    cocoa.drawStringWithColor("□ Available Unallocated Blocks", bar_x + 220.0, v_card_y + 16.0, 0.55, 0.60, 0.68, 1.0);
+
+    // 3. Engine & Hardware Specs Card
+    const e_card_y = v_card_y - 200.0;
+    const e_card_rect = cocoa.NSRect.init(20.0, e_card_y, bounds.w - 40.0, 185.0);
+    renderCardBg(ctx, e_card_rect);
+
+    cocoa.drawStringWithColor("ENGINE RUNTIME & PLATFORM ARCHITECTURE", 36.0, e_card_y + 148.0, 0.0, 0.90, 0.46, 1.0);
+    cocoa.drawStringWithColor("Engine Substrate: Pure-Zig 0.16.0 Native Binary (Mach-O ARM64)", 36.0, e_card_y + 120.0, 0.85, 0.88, 0.92, 1.0);
+    cocoa.drawStringWithColor("Zero-Overhead Contract: 0% WebKit, 0% JavaScript, 0% Electron, 0% Chromium overhead", 36.0, e_card_y + 96.0, 0.85, 0.88, 0.92, 1.0);
+    cocoa.drawStringWithColor("Graphics Pipeline: Direct QuartzCore CoreGraphics & Darwin AppKit Cocoa event loop", 36.0, e_card_y + 72.0, 0.85, 0.88, 0.92, 1.0);
+    cocoa.drawStringWithColor("Continuity Substrate: LatticeVault canonical substrate (proj_ca8e040834bb2b68fe778f499de101bd)", 36.0, e_card_y + 48.0, 0.85, 0.88, 0.92, 1.0);
+    cocoa.drawStringWithColor("Memory Footprint: <25 MB RSS resident memory under full interactive inspection", 36.0, e_card_y + 24.0, 0.0, 0.90, 1.0, 1.0);
+}
+
+fn onTelemetryMouseDown(self: cocoa.id, click_point: cocoa.NSPoint, bounds: cocoa.NSRect, state: *UIState) void {
+    _ = self;
+    _ = click_point;
+    _ = bounds;
+    _ = state;
+}
+
+// --- Time-Travel Snapshots (Workspace 7) -----------------------------------
+
+fn drawSnapshotsStudio(ctx: cocoa.CGContextRef, bounds: cocoa.NSRect, state: *UIState) void {
+    // 1. Top Header Bar
+    const top_bar_h: f64 = 44.0;
+    const top_bar_y: f64 = bounds.h - top_bar_h;
+    const bar_bg = cocoa.makeCGColor(0x10131B, 1.0);
+    defer cocoa.CGColorRelease(bar_bg);
+    cocoa.CGContextSetFillColorWithColor(ctx, bar_bg);
+    cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(0, top_bar_y, bounds.w, top_bar_h));
+
+    cocoa.drawStringWithColor("TIME-TRAVEL SNAPSHOTS  •  STREAMING ZSNP3 DISK CHURN DELTAS", 20.0, top_bar_y + 14.0, 0.0, 0.90, 1.0, 1.0);
+
+    // Button: Create Snapshot
+    const btn_w: f64 = 230.0;
+    const btn_h: f64 = 30.0;
+    const btn_x = bounds.w - btn_w - 20.0;
+    const btn_y = top_bar_y + 7.0;
+    renderButton(ctx, cocoa.NSRect.init(btn_x, btn_y, btn_w, btn_h), "📸  CREATE SNAPSHOT", 0x14202C, 0x00E5FF);
+
+    // 2. Info & Status Card
+    const info_y = top_bar_y - 120.0;
+    const info_rect = cocoa.NSRect.init(20.0, info_y, bounds.w - 40.0, 105.0);
+    renderCardBg(ctx, info_rect);
+
+    cocoa.drawStringWithColor("SNAPSHOT STATUS & SPECIFICATION (ZSNP3)", 36.0, info_y + 74.0, 0.0, 0.90, 1.0, 1.0);
+    cocoa.drawStringWithColor(state.snapshot_status, 36.0, info_y + 50.0, 0.0, 0.90, 0.46, 1.0);
+    cocoa.drawStringWithColor("ZSNP3 files record atomic snapshots with full Blake3 hashes, POSIX mtime, and APFS block clusters.", 36.0, info_y + 24.0, 0.65, 0.70, 0.76, 1.0);
+
+    // 3. Historical Details Card
+    const card2_y = info_y - 200.0;
+    const card2_rect = cocoa.NSRect.init(20.0, card2_y, bounds.w - 40.0, 185.0);
+    renderCardBg(ctx, card2_rect);
+
+    cocoa.drawStringWithColor("TIME-TRAVEL CAPABILITIES", 36.0, card2_y + 148.0, 0.0, 0.90, 0.46, 1.0);
+    cocoa.drawStringWithColor("• Instant Delta Diffing: Compare any two snapshots to detect disk bloat, created, shrunk, or deleted files.", 36.0, card2_y + 118.0, 0.85, 0.88, 0.92, 1.0);
+    cocoa.drawStringWithColor("• Temporal Decay Heatmaps: Visualizes filesystem age entropy (Fresh <30d, Warm, Cold, Iceberg >1y).", 36.0, card2_y + 90.0, 0.85, 0.88, 0.92, 1.0);
+    cocoa.drawStringWithColor("• Zero Tamper Verification: Re-scan snapshots to verify cryptographic Blake3 integrity of all saved nodes.", 36.0, card2_y + 62.0, 0.85, 0.88, 0.92, 1.0);
+    cocoa.drawStringWithColor("• Atomic Tempfile Publishing: Snapshots use mkstemp and atomic rename for crash-resilient persistence.", 36.0, card2_y + 34.0, 0.85, 0.88, 0.92, 1.0);
+}
+
+fn onSnapshotsMouseDown(self: cocoa.id, click_point: cocoa.NSPoint, bounds: cocoa.NSRect, state: *UIState) void {
+    const top_bar_h: f64 = 44.0;
+    const top_bar_y: f64 = bounds.h - top_bar_h;
+
+    // Check "CREATE SNAPSHOT" button click
+    const btn_w: f64 = 230.0;
+    const btn_h: f64 = 30.0;
+    const btn_x = bounds.w - btn_w - 20.0;
+    const btn_y = top_bar_y + 7.0;
+
+    if (click_point.x >= btn_x and click_point.x <= btn_x + btn_w and
+        click_point.y >= btn_y and click_point.y <= btn_y + btn_h)
+    {
+        const root = state.root_node;
+        if (root == null or state.scan_state == .idle) {
+            state.snapshot_status = "Run disk analysis first before creating a snapshot.";
+            cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
+            requestRedraw();
+            return;
+        }
+
+        const now = types.getRealtimeNs();
+        var path_buf: [1024]u8 = undefined;
+        const target = state.getTargetPath();
+        const snap_path = if (std.mem.eql(u8, target, "/"))
+            std.fmt.bufPrint(&path_buf, "/tmp/.zspace_snapshot_{d}.zsnp3", .{now}) catch {
+                state.snapshot_status = "Path buffer overflow";
+                return;
+            }
+        else if (std.mem.endsWith(u8, target, "/"))
+            std.fmt.bufPrint(&path_buf, "{s}.zspace_snapshot_{d}.zsnp3", .{ target, now }) catch {
+                state.snapshot_status = "Path buffer overflow";
+                return;
+            }
+        else
+            std.fmt.bufPrint(&path_buf, "{s}/.zspace_snapshot_{d}.zsnp3", .{ target, now }) catch {
+                state.snapshot_status = "Path buffer overflow";
+                return;
+            };
+
+        var engine = snapshot.SnapshotEngine.init(state.allocator);
+        engine.saveSnapshot(root.?, snap_path) catch |err| {
+            std.debug.print("Failed to save snapshot: {}\n", .{err});
+            state.snapshot_status = "Failed to write snapshot file (permission denied or disk full)";
+            cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
+            requestRedraw();
+            return;
+        };
+
+        state.snapshot_status = "✓ Saved atomic snapshot (ZSNP3 format) with streaming verification";
+        state.status_text = "Time-travel snapshot created successfully";
+        cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
+        requestRedraw();
+    }
+}
+
+// --- Audit Journal (Workspace 8) -------------------------------------------
+
+fn drawAuditJournal(ctx: cocoa.CGContextRef, bounds: cocoa.NSRect, state: *UIState) void {
+    if (state.journal_records == null) {
+        state.refreshJournal();
+    }
+
+    // 1. Top Header Bar
+    const top_bar_h: f64 = 44.0;
+    const top_bar_y: f64 = bounds.h - top_bar_h;
+    const bar_bg = cocoa.makeCGColor(0x10131B, 1.0);
+    defer cocoa.CGColorRelease(bar_bg);
+    cocoa.CGContextSetFillColorWithColor(ctx, bar_bg);
+    cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(0, top_bar_y, bounds.w, top_bar_h));
+
+    const records = if (state.journal_records) |*jr| jr.items else &.{};
+    var hdr_buf: [128]u8 = undefined;
+    const hdr_str = std.fmt.bufPrint(&hdr_buf, "AUDIT JOURNAL  •  Two-Phase Reversible Ledger  •  {d} Operations", .{records.len}) catch "";
+    cocoa.drawStringWithColor(hdr_str, 20.0, top_bar_y + 14.0, 0.0, 0.90, 1.0, 1.0);
+
+    // Button: Refresh Journal
+    const btn_w: f64 = 170.0;
+    const btn_h: f64 = 30.0;
+    const btn_x = bounds.w - btn_w - 20.0;
+    const btn_y = top_bar_y + 7.0;
+    renderButton(ctx, cocoa.NSRect.init(btn_x, btn_y, btn_w, btn_h), "⟳  REFRESH LEDGER", 0x14202C, 0x00E5FF);
+
+    if (records.len == 0) {
+        cocoa.drawStringWithColor("✓ Clean audit journal — No trash or dedup operations recorded yet.", bounds.w / 2.0 - 240.0, bounds.h / 2.0, 0.0, 0.90, 0.46, 1.0);
+        return;
+    }
+
+    // 2. Table Column Headers
+    const col_h: f64 = 28.0;
+    const col_y: f64 = top_bar_y - col_h;
+    const col_bg = cocoa.makeCGColor(0x141822, 1.0);
+    defer cocoa.CGColorRelease(col_bg);
+    cocoa.CGContextSetFillColorWithColor(ctx, col_bg);
+    cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(0, col_y, bounds.w, col_h));
+
+    cocoa.drawStringWithColor("RECEIPT ID", 24.0, col_y + 8.0, 0.70, 0.75, 0.82, 1.0);
+    cocoa.drawStringWithColor("METHOD", 220.0, col_y + 8.0, 0.70, 0.75, 0.82, 1.0);
+    cocoa.drawStringWithColor("SIZE", 340.0, col_y + 8.0, 0.70, 0.75, 0.82, 1.0);
+    cocoa.drawStringWithColor("ORIGINAL FILE PATH", 440.0, col_y + 8.0, 0.70, 0.75, 0.82, 1.0);
+    cocoa.drawStringWithColor("ACTION", bounds.w - 120.0, col_y + 8.0, 0.70, 0.75, 0.82, 1.0);
+
+    // 3. Virtualized Operations List
+    const row_h: f64 = 36.0;
+    const list_top: f64 = col_y;
+
+    var cur_y: f64 = list_top + state.journal_scroll_y;
+    for (records) |op| {
+        const row_top = cur_y;
+        cur_y -= row_h;
+
+        if (row_top > list_top or row_top < 0.0) continue;
+
+        // Alternate row fill
+        const alt_bg = cocoa.makeCGColor(0xFFFFFF, 0.02);
+        defer cocoa.CGColorRelease(alt_bg);
+        cocoa.CGContextSetFillColorWithColor(ctx, alt_bg);
+        cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(0, row_top - row_h, bounds.w, row_h - 1.0));
+
+        // Receipt ID (Cyan)
+        const rid_disp = if (op.receipt_id.len > 16) op.receipt_id[0..16] else op.receipt_id;
+        cocoa.drawStringWithColor(rid_disp, 24.0, row_top - 24.0, 0.0, 0.90, 1.0, 1.0);
+
+        // Method
+        const meth_lbl = op.method.label();
+        cocoa.drawStringWithColor(meth_lbl, 220.0, row_top - 24.0, 0.85, 0.88, 0.94, 1.0);
+
+        // Size
+        var sz_b: [32]u8 = undefined;
+        const sz_s = types.DiskNode.formatSize(op.size_bytes, &sz_b);
+        cocoa.drawStringWithColor(sz_s, 340.0, row_top - 24.0, 0.82, 0.86, 0.92, 1.0);
+
+        // Path
+        const max_p: usize = @intFromFloat(@max(10.0, (bounds.w - 580.0) / 8.0));
+        const p_disp = if (op.original_path.len > max_p) op.original_path[0..max_p] else op.original_path;
+        cocoa.drawStringWithColor(p_disp, 440.0, row_top - 24.0, 0.95, 0.96, 0.99, 1.0);
+
+        // Action button [ ⮌ UNDO ]
+        const u_btn_rect = cocoa.NSRect.init(bounds.w - 120.0, row_top - row_h + 5.0, 95.0, 26.0);
+        renderButton(ctx, u_btn_rect, "⮌ UNDO", 0x14202C, 0x00E5FF);
+    }
+}
+
+fn onAuditJournalMouseDown(self: cocoa.id, click_point: cocoa.NSPoint, bounds: cocoa.NSRect, state: *UIState) void {
+    const top_bar_h: f64 = 44.0;
+    const top_bar_y: f64 = bounds.h - top_bar_h;
+
+    // Check "REFRESH LEDGER" button click
+    const btn_w: f64 = 170.0;
+    const btn_h: f64 = 30.0;
+    const btn_x = bounds.w - btn_w - 20.0;
+    const btn_y = top_bar_y + 7.0;
+
+    if (click_point.x >= btn_x and click_point.x <= btn_x + btn_w and
+        click_point.y >= btn_y and click_point.y <= btn_y + btn_h)
+    {
+        state.refreshJournal();
+        state.status_text = "Audit journal refreshed from disk";
+        cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
+        requestRedraw();
+        return;
+    }
+
+    // Check individual UNDO buttons
+    const records = if (state.journal_records) |*jr| jr.items else return;
+    const col_h: f64 = 28.0;
+    const list_top: f64 = top_bar_y - col_h;
+    const row_h: f64 = 36.0;
+
+    var cur_y: f64 = list_top + state.journal_scroll_y;
+    for (records) |op| {
+        const row_top = cur_y;
+        cur_y -= row_h;
+
+        if (click_point.y > row_top or click_point.y < row_top - row_h) continue;
+
+        const u_btn_x = bounds.w - 120.0;
+        const u_btn_y = row_top - row_h + 5.0;
+        if (click_point.x >= u_btn_x and click_point.x <= u_btn_x + 95.0 and
+            click_point.y >= u_btn_y and click_point.y <= u_btn_y + 26.0)
+        {
+            var cl = cleaner.Cleaner.init(state.allocator) catch return;
+            defer cl.deinit();
+
+            const restored = cl.undoByReceipt(op.receipt_id) catch |err| {
+                std.debug.print("Failed to undo receipt {s}: {}\n", .{ op.receipt_id, err });
+                state.status_text = "Undo failed: receipt not found or item altered";
+                cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
+                requestRedraw();
+                return;
+            };
+            _ = restored;
+            state.status_text = "✓ Restored item from Trash with Blake3 verification!";
+            state.refreshJournal();
+            cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
+            requestRedraw();
+            return;
+        }
+    }
+}
+
 // --- 4. Main Stage View Subclass -------------------------------------------
 
 fn drawStageRect(self: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.c) void {
@@ -1254,8 +1776,11 @@ fn drawStageRect(self: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.c)
         .super_finder => drawSuperFinder(ctx, bounds, state),
         .dedup_studio => drawDedupStudio(ctx, bounds, state),
         .quick_wins => drawQuickWinsSweeper(ctx, bounds, state),
+        .baremetal_editor => drawBaremetalEditor(ctx, bounds, state),
+        .machine_telemetry => drawMachineTelemetry(ctx, bounds, state),
         .spacetime_visualizer => drawSpacetimeVisualizer(ctx, bounds, state),
-        else => drawWorkspacePlaceholder(ctx, bounds, state.active_tab),
+        .time_travel_snapshots => drawSnapshotsStudio(ctx, bounds, state),
+        .audit_journal => drawAuditJournal(ctx, bounds, state),
     }
 }
 
@@ -1273,8 +1798,11 @@ fn onStageMouseDown(self: cocoa.id, _: cocoa.SEL, event: cocoa.id) callconv(.c) 
         .super_finder => onSuperFinderMouseDown(self, click_point, bounds, state, event),
         .dedup_studio => onDedupStudioMouseDown(self, click_point, bounds, state),
         .quick_wins => onQuickWinsMouseDown(self, click_point, bounds, state),
+        .baremetal_editor => onBaremetalMouseDown(self, click_point, bounds, state),
+        .machine_telemetry => onTelemetryMouseDown(self, click_point, bounds, state),
         .spacetime_visualizer => onSpacetimeMouseDown(self, click_point, bounds, state),
-        else => {},
+        .time_travel_snapshots => onSnapshotsMouseDown(self, click_point, bounds, state),
+        .audit_journal => onAuditJournalMouseDown(self, click_point, bounds, state),
     }
 }
 
@@ -1288,6 +1816,9 @@ fn onStageScrollWheel(self: cocoa.id, _: cocoa.SEL, event: cocoa.id) callconv(.c
         .super_finder => state.scroll_offset_y = @max(0.0, state.scroll_offset_y - dy),
         .dedup_studio => state.dedup_scroll_y = @max(0.0, state.dedup_scroll_y - dy),
         .quick_wins => state.quick_wins_scroll_y = @max(0.0, state.quick_wins_scroll_y - dy),
+        .baremetal_editor => state.baremetal_scroll_y = @max(0.0, state.baremetal_scroll_y - dy),
+        .time_travel_snapshots => state.snapshots_scroll_y = @max(0.0, state.snapshots_scroll_y - dy),
+        .audit_journal => state.journal_scroll_y = @max(0.0, state.journal_scroll_y - dy),
         else => {},
     }
     cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);

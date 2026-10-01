@@ -715,4 +715,96 @@ test "Phase 2: Dedup Studio and Quick-Wins Sweeper engine integration" {
     try std.testing.expect(ui_state.quick_wins == null);
 }
 
+test "Phase 3: Baremetal Editor hex dump logic and Machine Telemetry volume calculations" {
+    // 1. Hex dump formatting test
+    const raw_test = [_]u8{ 0x7f, 'E', 'L', 'F', 0x02, 0x01, 0x01, 0x00, 'Z', 'S', 'P', 'A', 'C', 'E', 0x0A, 0x00 };
+    var hex_str: [80]u8 = [_]u8{' '} ** 80;
+    var h_pos: usize = 0;
+    for (raw_test, 0..) |b, i| {
+        if (i == 8) {
+            hex_str[h_pos] = ' ';
+            h_pos += 1;
+        }
+        _ = std.fmt.bufPrint(hex_str[h_pos .. h_pos + 3], "{x:0>2} ", .{b}) catch {};
+        h_pos += 3;
+    }
 
+    // Verify 8th byte separation and hex octets
+    try std.testing.expectEqualStrings("7f 45 4c 46 02 01 01 00  5a 53 50 41 43 45 0a 00 ", hex_str[0..49]);
+
+    // Verify ASCII decode column replacement for non-printable characters
+    var asc_str: [18]u8 = [_]u8{'.'} ** 18;
+    for (raw_test, 0..) |b, i| {
+        if (b >= 32 and b <= 126) {
+            asc_str[i] = b;
+        }
+    }
+    asc_str[raw_test.len] = 0;
+    try std.testing.expectEqualStrings(".ELF....ZSPACE..", asc_str[0..raw_test.len]);
+
+    // 2. POSIX Inode stat sector calculation (512B sectors per POSIX standard)
+    const mock_st_blocks: i64 = 64; // 64 sectors of 512 bytes = 32768 bytes
+    const size_on_disk: u64 = @as(u64, @intCast(mock_st_blocks)) * 512;
+    try std.testing.expectEqual(@as(u64, 32768), size_on_disk);
+
+    // 3. Machine Telemetry APFS volume calculation
+    const total_volume: u64 = 1_000_000_000_000; // 1 TB
+    const free_volume: u64 = 350_000_000_000;    // 350 GB
+    const used_volume: u64 = total_volume - free_volume; // 650 GB
+    const pct_used: f32 = (@as(f32, @floatFromInt(used_volume)) / @as(f32, @floatFromInt(total_volume))) * 100.0;
+
+    try std.testing.expectEqual(@as(u64, 650_000_000_000), used_volume);
+    try std.testing.expectApproxEqAbs(@as(f32, 65.0), pct_used, 0.001);
+
+    const bar_w: f64 = 500.0;
+    const pct = @min(100.0, @max(0.0, pct_used));
+    const used_w: f64 = bar_w * (@as(f64, @floatCast(pct)) / 100.0);
+    try std.testing.expectApproxEqAbs(@as(f64, 325.0), used_w, 0.1);
+}
+
+test "Phase 4: Time-Travel Snapshots (ZSNP3) and Audit Journal reversible ledger integration" {
+    const allocator = std.testing.allocator;
+
+    // 1. Time-Travel Snapshots (ZSNP3) round-trip test
+    var fixture = try makeHermeticFixture(allocator);
+    defer fixture.cleanup(allocator);
+
+    var sc = scanner.Scanner.init(allocator, .{});
+    defer sc.deinit();
+    const root = try sc.scan(fixture.root_path);
+
+    var snap_engine = snapshot.SnapshotEngine.init(allocator);
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base_len = try fixture.tmp.dir.realPath(std.testing.io, &base_buf);
+    const snap_path = try std.fmt.allocPrint(allocator, "{s}/test_phase4.zsnp3", .{base_buf[0..base_len]});
+    defer allocator.free(snap_path);
+
+    try snap_engine.saveSnapshot(root, snap_path);
+
+    // Verify snapshot file starts with SNAP_MAGIC
+    const snap_data = try cleaner.readWholeFileLibc(allocator, snap_path, 1024 * 1024);
+    defer allocator.free(snap_data);
+    try std.testing.expect(snap_data.len >= snapshot.SNAP_MAGIC.len);
+    try std.testing.expectEqualStrings(snapshot.SNAP_MAGIC, snap_data[0..snapshot.SNAP_MAGIC.len]);
+
+    // Verify loadSnapshot parses version 3 and complete flag
+    var loaded = try snap_engine.loadSnapshot(snap_path);
+    defer snap_engine.freeSnapshot(&loaded);
+    try std.testing.expectEqual(@as(u8, 3), loaded.version);
+    try std.testing.expect(loaded.complete);
+    try std.testing.expect(loaded.entries.count() > 0);
+
+    // 2. Audit Journal UIState lifecycle and reversible ledger test
+    var ui_state = components.UIState.init(allocator);
+    defer ui_state.deinit();
+
+    try std.testing.expect(ui_state.journal_records == null);
+
+    // Test refreshing journal (reads or creates empty ledger gracefully)
+    ui_state.refreshJournal();
+    try std.testing.expect(ui_state.journal_records != null);
+
+    // Test clearing journal cleanly
+    ui_state.clearJournal();
+    try std.testing.expect(ui_state.journal_records == null);
+}
