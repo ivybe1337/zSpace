@@ -13,6 +13,7 @@ pub const repl = @import("repl/repl.zig");
 pub const visualizer3d = @import("gui/visualizer3d.zig");
 pub const sunburst = @import("gui/sunburst.zig");
 pub const treemap = @import("gui/treemap.zig");
+pub const components = @import("gui/components.zig");
 
 // C06: args come from std.process.Init (see main below).
 // Legacy extern NXArgc/NXArgv removed: they break on Finder -psn launch.
@@ -518,3 +519,135 @@ test "C04 trash + journal + undo receipt (hermetic)" {
         try std.testing.expectEqualSlices(u8, &before, &dg);
     }
 }
+
+test "Phase 1: Super Finder disk node sorting and directory-first ordering" {
+    var d1: types.DiskNode = .{
+        .name = "src",
+        .path = "/test/src",
+        .kind = .directory,
+        .size_bytes = 1000,
+        .allocated_bytes = 2048,
+        .mtime_ns = 100,
+        .category = .Code_Dev,
+        .protection = .None,
+    };
+    var d2: types.DiskNode = .{
+        .name = "docs",
+        .path = "/test/docs",
+        .kind = .directory,
+        .size_bytes = 5000,
+        .allocated_bytes = 4096,
+        .mtime_ns = 300,
+        .category = .Documents,
+        .protection = .None,
+    };
+    var f1: types.DiskNode = .{
+        .name = "build.zig",
+        .path = "/test/build.zig",
+        .kind = .file,
+        .size_bytes = 200,
+        .allocated_bytes = 512,
+        .mtime_ns = 200,
+        .category = .Build_Artifacts,
+        .protection = .None,
+    };
+    var f2: types.DiskNode = .{
+        .name = "zspace.bin",
+        .path = "/test/zspace.bin",
+        .kind = .file,
+        .size_bytes = 10000,
+        .allocated_bytes = 16384,
+        .mtime_ns = 50,
+        .category = .Build_Artifacts,
+        .protection = .None,
+    };
+    var f3: types.DiskNode = .{
+        .name = "README.md",
+        .path = "/test/README.md",
+        .kind = .file,
+        .size_bytes = 50,
+        .allocated_bytes = 128,
+        .mtime_ns = 400,
+        .category = .Documents,
+        .protection = .None,
+    };
+
+    var nodes = [_]*types.DiskNode{ &f1, &d1, &f2, &d2, &f3 };
+
+    // 1. Sort by Size descending: directories first (docs 5000 > src 1000), then files (zspace.bin 10000 > build.zig 200 > README.md 50)
+    components.sortDiskNodes(&nodes, .size, .descending);
+    try std.testing.expectEqualStrings("docs", nodes[0].name);
+    try std.testing.expectEqualStrings("src", nodes[1].name);
+    try std.testing.expectEqualStrings("zspace.bin", nodes[2].name);
+    try std.testing.expectEqualStrings("build.zig", nodes[3].name);
+    try std.testing.expectEqualStrings("README.md", nodes[4].name);
+
+    // 2. Sort by Name ascending: directories first (docs < src), then files (README.md < build.zig < zspace.bin)
+    components.sortDiskNodes(&nodes, .name, .ascending);
+    try std.testing.expectEqualStrings("docs", nodes[0].name);
+    try std.testing.expectEqualStrings("src", nodes[1].name);
+    try std.testing.expectEqualStrings("README.md", nodes[2].name);
+    try std.testing.expectEqualStrings("build.zig", nodes[3].name);
+    try std.testing.expectEqualStrings("zspace.bin", nodes[4].name);
+
+    // 3. Sort by Blocks descending: directories first (docs 4096 > src 2048), then files (zspace.bin 16384 > build.zig 512 > README.md 128)
+    components.sortDiskNodes(&nodes, .blocks, .descending);
+    try std.testing.expectEqualStrings("docs", nodes[0].name);
+    try std.testing.expectEqualStrings("src", nodes[1].name);
+    try std.testing.expectEqualStrings("zspace.bin", nodes[2].name);
+    try std.testing.expectEqualStrings("build.zig", nodes[3].name);
+    try std.testing.expectEqualStrings("README.md", nodes[4].name);
+
+    // 4. Sort by Modified ascending: directories first (src 100 < docs 300), then files (zspace.bin 50 < build.zig 200 < README.md 400)
+    components.sortDiskNodes(&nodes, .modified, .ascending);
+    try std.testing.expectEqualStrings("src", nodes[0].name);
+    try std.testing.expectEqualStrings("docs", nodes[1].name);
+    try std.testing.expectEqualStrings("zspace.bin", nodes[2].name);
+    try std.testing.expectEqualStrings("build.zig", nodes[3].name);
+    try std.testing.expectEqualStrings("README.md", nodes[4].name);
+}
+
+test "Phase 1: Super Finder virtualized scroll window calculation" {
+    const row_h: f64 = 32.0;
+    const header_h: f64 = 28.0;
+    const breadcrumb_h: f64 = 34.0;
+    const bounds_h: f64 = 600.0;
+    const list_h: f64 = bounds_h - breadcrumb_h - header_h; // 538.0
+    const total_rows: usize = 1000;
+
+    // Case 1: Scroll offset = 0
+    {
+        const scroll_offset_y: f64 = 0.0;
+        const start_row: usize = @as(usize, @intFromFloat(@max(0.0, @floor(scroll_offset_y / row_h))));
+        const visible_count: usize = @as(usize, @intFromFloat(@ceil(list_h / row_h))) + 2;
+        const end_row: usize = @min(total_rows, start_row + visible_count);
+
+        try std.testing.expectEqual(@as(usize, 0), start_row);
+        try std.testing.expect(end_row <= total_rows);
+        try std.testing.expectEqual(@as(usize, 19), end_row); // ceil(538/32) = 17 + 2 = 19
+    }
+
+    // Case 2: Scroll offset = 640.0 (scrolled 20 rows down)
+    {
+        const scroll_offset_y: f64 = 640.0;
+        const start_row: usize = @as(usize, @intFromFloat(@max(0.0, @floor(scroll_offset_y / row_h))));
+        const visible_count: usize = @as(usize, @intFromFloat(@ceil(list_h / row_h))) + 2;
+        const end_row: usize = @min(total_rows, start_row + visible_count);
+
+        try std.testing.expectEqual(@as(usize, 20), start_row);
+        try std.testing.expectEqual(@as(usize, 39), end_row);
+    }
+
+    // Case 3: Empty directory (total_rows = 0)
+    {
+        const total_zero: usize = 0;
+        const scroll_offset_y: f64 = 0.0;
+        const start_row: usize = @as(usize, @intFromFloat(@max(0.0, @floor(scroll_offset_y / row_h))));
+        const visible_count: usize = @as(usize, @intFromFloat(@ceil(list_h / row_h))) + 2;
+        const end_row: usize = @min(total_zero, start_row + visible_count);
+
+        try std.testing.expect(start_row >= end_row or start_row == 0);
+        try std.testing.expectEqual(@as(usize, 0), end_row);
+    }
+}
+

@@ -125,6 +125,11 @@ pub inline fn sendVoidInt(target: id, sel: SEL, val: isize) void {
     @as(F, @ptrCast(&objc_msgSend))(target, sel, val);
 }
 
+pub inline fn sendGetInt0(target: id, sel: SEL) isize {
+    const F = *const fn (id, SEL) callconv(.c) isize;
+    return @as(F, @ptrCast(&objc_msgSend))(target, sel);
+}
+
 pub inline fn sendInitRect(target: id, sel: SEL, rect: NSRect) id {
     const F = *const fn (id, SEL, NSRect) callconv(.c) id;
     return @as(F, @ptrCast(&objc_msgSend))(target, sel, rect);

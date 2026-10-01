@@ -10,6 +10,30 @@ const cocoa = @import("cocoa.zig");
 const components = @import("components.zig");
 const theme = @import("theme.zig");
 const disks = @import("../core/disks.zig");
+const cleaner = @import("../core/cleaner.zig");
+
+fn onTrashNode(node: *const types.DiskNode) void {
+    var cl = cleaner.Cleaner.init(std.heap.page_allocator) catch |err| {
+        std.debug.print("Failed to initialize cleaner: {}\n", .{err});
+        return;
+    };
+    defer cl.deinit();
+
+    _ = cl.safeMoveToTrash(node.path, node.size_bytes, node.protection) catch |err| {
+        std.debug.print("Failed to move '{s}' to trash: {}\n", .{ node.path, err });
+        if (components.global_ui_state) |state| {
+            state.status_text = "Trash failed (item protected or permission denied)";
+            components.requestRedraw();
+        }
+        return;
+    };
+
+    if (components.global_ui_state) |state| {
+        state.status_text = "Item safely moved to Trash (reversible via journal)";
+        state.selected_node = null;
+        components.requestRedraw();
+    }
+}
 
 const ScanContext = struct {
     scanner: *scanner.Scanner,
@@ -204,6 +228,7 @@ pub fn runGuiApp(allocator: std.mem.Allocator, target_path: []const u8) !void {
     ui_state.scan_trigger_fn = &triggerScan;
     ui_state.choose_target_fn = &triggerChooseTarget;
     ui_state.preset_select_fn = &selectTargetPreset;
+    ui_state.trash_node_fn = &onTrashNode;
 
     // Query primary volume storage metrics (instant statfs, 0ms, zero background indexing)
     var dm = disks.DiskMapper.init(allocator);
@@ -351,38 +376,25 @@ pub fn runGuiApp(allocator: std.mem.Allocator, target_path: []const u8) !void {
     cocoa.sendVoidInt(sidebar_view, sel_setAutoresizingMask, 1 | 16); // min-x margin (stick to right) + height resizable
     cocoa.sendVoid1(root_view, sel_addSubview, sidebar_view);
 
-    // Left Visual Stack (Sunburst top + Treemap flex bottom)
-    const left_w: f64 = cur_w - sidebar_w - rail_w;
-    const sunburst_h: f64 = @min(340.0, content_h * 0.55);
-    const treemap_h: f64 = content_h - sunburst_h;
-
-    // Treemap View (bottom of visual stack: y = 32)
-    const TreemapCls = cocoa.objc_getClass("ZSpaceTreemapView");
-    const treemap_alloc = cocoa.send0(TreemapCls, sel_alloc);
-    const treemap_view = cocoa.sendInitRect(treemap_alloc, sel_initWithFrame, cocoa.NSRect.init(rail_w, 32, left_w, treemap_h));
-    cocoa.sendVoidInt(treemap_view, sel_setAutoresizingMask, 2 | 16); // width + height resizable
-    cocoa.sendVoid1(root_view, sel_addSubview, treemap_view);
-
-    // Sunburst View (top of visual stack: y = 32 + treemap_h)
-    const SunburstCls = cocoa.objc_getClass("ZSpaceSunburstView");
-    const sunburst_alloc = cocoa.send0(SunburstCls, sel_alloc);
-    const sunburst_view = cocoa.sendInitRect(sunburst_alloc, sel_initWithFrame, cocoa.NSRect.init(rail_w, 32 + treemap_h, left_w, sunburst_h));
-    cocoa.sendVoidInt(sunburst_view, sel_setAutoresizingMask, 2 | 8); // width resizable + stick to top
-    cocoa.sendVoid1(root_view, sel_addSubview, sunburst_view);
+    // Main Stage View (spans the entire central area between rail and sidebar)
+    const stage_w: f64 = cur_w - sidebar_w - rail_w;
+    const StageCls = cocoa.objc_getClass("ZSpaceStageView");
+    const stage_alloc = cocoa.send0(StageCls, sel_alloc);
+    const stage_view = cocoa.sendInitRect(stage_alloc, sel_initWithFrame, cocoa.NSRect.init(rail_w, 32, stage_w, content_h));
+    cocoa.sendVoidInt(stage_view, sel_setAutoresizingMask, 2 | 16); // width + height resizable
+    cocoa.sendVoid1(root_view, sel_addSubview, stage_view);
 
     components.view_header = header_view;
     components.view_status = status_view;
     components.view_sidebar = sidebar_view;
     components.view_workspace_rail = rail_view;
-    components.view_treemap = treemap_view;
-    components.view_sunburst = sunburst_view;
+    components.view_stage = stage_view;
     defer {
         components.view_header = null;
         components.view_status = null;
         components.view_sidebar = null;
         components.view_workspace_rail = null;
-        components.view_treemap = null;
-        components.view_sunburst = null;
+        components.view_stage = null;
     }
 
     // 7. Order Front and Display Window Instantly (<50ms)

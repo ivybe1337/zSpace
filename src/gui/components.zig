@@ -346,42 +346,22 @@ fn onHeaderMouseDown(self: cocoa.id, _: cocoa.SEL, event: cocoa.id) callconv(.c)
     }
 }
 
-// --- 2. SunburstView: Radial Spacetime Visualizer ---------------------------
+// --- 2. Main Stage: Super Finder, Spacetime Visualizer & Workspaces ---------
 
-fn drawSunburstRect(self: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.c) void {
-    _ = dirty;
-    const ctx = cocoa.getCurrentGraphicsContext() orelse return;
-    cocoa.CGContextSaveGState(ctx);
-    defer cocoa.CGContextRestoreGState(ctx);
-
-    const bounds = cocoa.sendGetRect(self, sel_bounds);
-
-    // Card background #0D0E12
-    const bg_color = cocoa.makeCGColor(0x0D0E12, 1.0);
-    defer cocoa.CGColorRelease(bg_color);
-    cocoa.CGContextSetFillColorWithColor(ctx, bg_color);
-    cocoa.CGContextFillRect(ctx, bounds);
-    const center_x = bounds.w / 2.0;
-    const center_y = bounds.h / 2.0;
-
-    const state = global_ui_state orelse return;
-    if (state.active_tab != .super_finder and state.active_tab != .spacetime_visualizer) {
-        drawWorkspacePlaceholder(ctx, bounds, state.active_tab);
-        return;
-    }
+fn drawSuperFinder(ctx: cocoa.CGContextRef, bounds: cocoa.NSRect, state: *UIState) void {
     const node_opt = state.drill_node orelse state.root_node;
-
     if (node_opt == null or state.scan_state == .idle) {
         if (state.scan_state == .idle) {
+            const center_x = bounds.w / 2.0;
             // Hero Title
-            cocoa.drawStringWithColor("YOUR STORAGE, IN CLEAR VIEW", center_x - 138, bounds.h - 40, 0.0, 0.90, 1.0, 1.0);
-            cocoa.drawStringWithColor("Choose a folder and scan when you are ready. ZSpace stays idle until then.", center_x - 250, bounds.h - 65, 0.55, 0.60, 0.68, 1.0);
+            cocoa.drawStringWithColor("SUPER FINDER  —  DEVELOPER DISK EXPLORER", center_x - 170, bounds.h - 40, 0.0, 0.90, 1.0, 1.0);
+            cocoa.drawStringWithColor("Select a target directory below or press [ ▶ SCAN TARGET ] above to begin.", center_x - 240, bounds.h - 65, 0.55, 0.60, 0.68, 1.0);
 
             // Volume Telemetry Card
             const card_w: f64 = @min(660.0, bounds.w - 40.0);
             const card_h: f64 = 96.0;
             const card_x: f64 = (bounds.w - card_w) / 2.0;
-            const card_y: f64 = (bounds.h - card_h) / 2.0 - 15.0;
+            const card_y: f64 = bounds.h - 180.0;
             const card_rect = cocoa.NSRect.init(card_x, card_y, card_w, card_h);
 
             const card_bg = cocoa.makeCGColor(0x12151D, 0.95);
@@ -395,10 +375,8 @@ fn drawSunburstRect(self: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(
             cocoa.CGContextSetLineWidth(ctx, 1.2);
             cocoa.CGContextStrokeRect(ctx, card_rect);
 
-            // Title & Mount
             cocoa.drawStringWithColor("PRIMARY VOLUME TELEMETRY: Macintosh HD (APFS)", card_x + 20, card_y + 68, 0.90, 0.93, 0.96, 1.0);
 
-            // Formatted Space String
             var used_b: [32]u8 = undefined;
             var free_b: [32]u8 = undefined;
             var tot_b: [32]u8 = undefined;
@@ -415,11 +393,9 @@ fn drawSunburstRect(self: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(
             }) catch "Storage stats ready";
             cocoa.drawStringWithColor(stat_str, card_x + 20, card_y + 44, 0.65, 0.70, 0.76, 1.0);
 
-            // Storage Gauge Bar
             const bar_w = card_w - 40.0;
             const bar_h = 10.0;
             const bar_rect = cocoa.NSRect.init(card_x + 20, card_y + 18, bar_w, bar_h);
-
             const bar_bg = cocoa.makeCGColor(0x1B202A, 1.0);
             defer cocoa.CGColorRelease(bar_bg);
             cocoa.CGContextSetFillColorWithColor(ctx, bar_bg);
@@ -428,182 +404,403 @@ fn drawSunburstRect(self: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(
             const pct = @min(100.0, @max(0.0, state.volume_pct_used));
             const fill_w = bar_w * (@as(f64, @floatCast(pct)) / 100.0);
             const fill_rect = cocoa.NSRect.init(card_x + 20, card_y + 18, fill_w, bar_h);
-
             const bar_fill = cocoa.makeCGColor(0x00E5FF, 0.85);
             defer cocoa.CGColorRelease(bar_fill);
             cocoa.CGContextSetFillColorWithColor(ctx, bar_fill);
             cocoa.CGContextFillRect(ctx, fill_rect);
 
-            const bar_border = cocoa.makeCGColor(0x2E3646, 0.8);
-            defer cocoa.CGColorRelease(bar_border);
-            cocoa.CGContextSetStrokeColorWithColor(ctx, bar_border);
-            cocoa.CGContextSetLineWidth(ctx, 1.0);
-            cocoa.CGContextStrokeRect(ctx, bar_rect);
+            // Presets Header & Cards
+            const p_y = bounds.h - 225.0;
+            cocoa.drawStringWithColor("QUICK TARGET PRESETS  —  Select location to inspect:", 36, p_y, 0.85, 0.88, 0.94, 1.0);
+            renderPresetsGrid(ctx, bounds, state, p_y - 20.0);
         } else if (state.scan_state == .scanning) {
-            cocoa.drawStringWithColor("Analyzing spacetime radial distribution...", center_x - 130, center_y - 7, 0.0, 0.90, 1.0, 1.0);
+            cocoa.drawStringWithColor("Scanning and indexing directory in background...", bounds.w / 2.0 - 150, bounds.h / 2.0, 0.0, 0.90, 1.0, 1.0);
         } else {
-            cocoa.drawStringWithColor("No files found or empty directory.", center_x - 110, center_y - 7, 0.56, 0.61, 0.68, 1.0);
+            cocoa.drawStringWithColor("Directory is empty or inaccessible.", bounds.w / 2.0 - 100, bounds.h / 2.0, 0.55, 0.60, 0.68, 1.0);
         }
         return;
     }
 
     const node = node_opt.?;
+
+    // Sort items according to active sort settings
+    sortDiskNodes(node.children.items, state.sort_col, state.sort_dir);
+
+    // 1. Breadcrumb Navigation Bar (Top 36px: bounds.h - 36 to bounds.h)
+    const crumb_bar_h: f64 = 36.0;
+    const crumb_bar_y: f64 = bounds.h - crumb_bar_h;
+    const crumb_bg = cocoa.makeCGColor(0x11141B, 1.0);
+    defer cocoa.CGColorRelease(crumb_bg);
+    cocoa.CGContextSetFillColorWithColor(ctx, crumb_bg);
+    cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(0, crumb_bar_y, bounds.w, crumb_bar_h));
+
+    // Hairline divider
+    const div_color = cocoa.makeCGColor(0x282C37, 0.8);
+    defer cocoa.CGColorRelease(div_color);
+    cocoa.CGContextSetStrokeColorWithColor(ctx, div_color);
+    cocoa.CGContextSetLineWidth(ctx, 1.0);
+    cocoa.CGContextBeginPath(ctx);
+    cocoa.CGContextMoveToPoint(ctx, 0, crumb_bar_y);
+    cocoa.CGContextAddLineToPoint(ctx, bounds.w, crumb_bar_y);
+    cocoa.CGContextDrawPath(ctx, 2);
+
+    var cur_crumb_x: f64 = 16.0;
+    if (state.drill_node != null) {
+        // [ ⮌ BACK ] button
+        const back_w: f64 = 66.0;
+        const back_h: f64 = 24.0;
+        const back_y = crumb_bar_y + 6.0;
+        const back_rect = cocoa.NSRect.init(cur_crumb_x, back_y, back_w, back_h);
+
+        const b_bg = cocoa.makeCGColor(0x1B2230, 0.95);
+        defer cocoa.CGColorRelease(b_bg);
+        cocoa.CGContextSetFillColorWithColor(ctx, b_bg);
+        cocoa.CGContextFillRect(ctx, back_rect);
+
+        const b_border = cocoa.makeCGColor(0x00E5FF, 0.6);
+        defer cocoa.CGColorRelease(b_border);
+        cocoa.CGContextSetStrokeColorWithColor(ctx, b_border);
+        cocoa.CGContextSetLineWidth(ctx, 1.0);
+        cocoa.CGContextStrokeRect(ctx, back_rect);
+
+        cocoa.drawStringWithColor("⮌ BACK", cur_crumb_x + 12, back_y + 6, 0.0, 0.90, 1.0, 1.0);
+        cur_crumb_x += back_w + 14.0;
+    }
+
+    // Path segments
+    var path_slice = node.path;
+    if (path_slice.len > 55) {
+        path_slice = path_slice[path_slice.len - 55 ..];
+    }
+    cocoa.drawStringWithColor(path_slice, cur_crumb_x, crumb_bar_y + 11, 0.90, 0.93, 0.96, 1.0);
+
+    // Summary item counts on right
+    var summary_buf: [64]u8 = undefined;
+    var sz_b: [32]u8 = undefined;
+    const sz_str = types.DiskNode.formatSize(node.size_bytes, &sz_b);
+    const sum_str = std.fmt.bufPrint(&summary_buf, "{d} items • {s}", .{ node.children.items.len, sz_str }) catch "";
+    cocoa.drawStringWithColor(sum_str, bounds.w - 175.0, crumb_bar_y + 11, 0.0, 0.90, 1.0, 1.0);
+
+    // 2. Column Headers Bar (Height 28px: bounds.h - 64 to bounds.h - 36)
+    const header_h: f64 = 28.0;
+    const header_y: f64 = crumb_bar_y - header_h;
+    const h_bg = cocoa.makeCGColor(0x141822, 1.0);
+    defer cocoa.CGColorRelease(h_bg);
+    cocoa.CGContextSetFillColorWithColor(ctx, h_bg);
+    cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(0, header_y, bounds.w, header_h));
+
+    // Column positions
+    const fixed_right: f64 = 520.0;
+    const name_w: f64 = @max(160.0, bounds.w - 36.0 - fixed_right);
+    const name_x: f64 = 36.0;
+    const size_x: f64 = name_x + name_w;
+    const blocks_x: f64 = size_x + 100.0;
+    const cat_x: f64 = blocks_x + 110.0;
+    const mod_x: f64 = cat_x + 130.0;
+    const perms_x: f64 = mod_x + 110.0;
+    _ = perms_x;
+
+    // Header labels with sort arrows
+    const name_lbl = if (state.sort_col == .name) (if (state.sort_dir == .ascending) "▲ NAME" else "▼ NAME") else "NAME";
+    const size_lbl = if (state.sort_col == .size) (if (state.sort_dir == .ascending) "▲ SIZE" else "▼ SIZE") else "SIZE";
+    const blocks_lbl = if (state.sort_col == .blocks) (if (state.sort_dir == .ascending) "▲ BLOCKS" else "▼ BLOCKS") else "BLOCKS (APFS)";
+    const cat_lbl = if (state.sort_col == .category) (if (state.sort_dir == .ascending) "▲ CATEGORY" else "▼ CATEGORY") else "CATEGORY";
+    const mod_lbl = if (state.sort_col == .modified) (if (state.sort_dir == .ascending) "▲ MODIFIED" else "▼ MODIFIED") else "MODIFIED";
+
+    cocoa.drawStringWithColor(name_lbl, name_x, header_y + 8, 0.70, 0.75, 0.82, 1.0);
+    cocoa.drawStringWithColor(size_lbl, size_x, header_y + 8, 0.70, 0.75, 0.82, 1.0);
+    cocoa.drawStringWithColor(blocks_lbl, blocks_x, header_y + 8, 0.70, 0.75, 0.82, 1.0);
+    cocoa.drawStringWithColor(cat_lbl, cat_x, header_y + 8, 0.70, 0.75, 0.82, 1.0);
+    cocoa.drawStringWithColor(mod_lbl, mod_x, header_y + 8, 0.70, 0.75, 0.82, 1.0);
+
+    // 3. Virtualized Table Rows
+    const table_top: f64 = header_y;
+    const table_h: f64 = table_top;
+    const row_h: f64 = 28.0;
+    const total_rows: usize = node.children.items.len;
+    const total_content_h: f64 = @as(f64, @floatFromInt(total_rows)) * row_h;
+    const max_scroll: f64 = @max(0.0, total_content_h - table_h);
+
+    if (state.scroll_offset_y > max_scroll) state.scroll_offset_y = max_scroll;
+    if (state.scroll_offset_y < 0.0) state.scroll_offset_y = 0.0;
+
+    const start_row: usize = @as(usize, @intFromFloat(@floor(state.scroll_offset_y / row_h)));
+    const visible_count: usize = @as(usize, @intFromFloat(@ceil(table_h / row_h))) + 2;
+    const end_row: usize = @min(total_rows, start_row + visible_count);
+
+    const now_ns = types.getRealtimeNs();
+
+    if (total_rows == 0) {
+        cocoa.drawStringWithColor("Folder is empty (0 items)", bounds.w / 2.0 - 90.0, table_h / 2.0, 0.45, 0.50, 0.60, 1.0);
+    }
+
+    var r_idx = start_row;
+    while (r_idx < end_row) : (r_idx += 1) {
+        const child = node.children.items[r_idx];
+        const row_y = table_top - (@as(f64, @floatFromInt(r_idx)) * row_h - state.scroll_offset_y) - row_h;
+        if (row_y + row_h <= 0.0 or row_y >= table_top) continue;
+
+        const is_selected = (state.selected_node == child);
+
+        // Row background
+        if (is_selected) {
+            const sel_bg = cocoa.makeCGColor(0x00E5FF, 0.16);
+            defer cocoa.CGColorRelease(sel_bg);
+            cocoa.CGContextSetFillColorWithColor(ctx, sel_bg);
+            cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(4, row_y + 1, bounds.w - 8, row_h - 2));
+
+            const sel_marker = cocoa.makeCGColor(0x00E5FF, 1.0);
+            defer cocoa.CGColorRelease(sel_marker);
+            cocoa.CGContextSetFillColorWithColor(ctx, sel_marker);
+            cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(4, row_y + 1, 3, row_h - 2));
+        } else if (r_idx % 2 == 1) {
+            const alt_bg = cocoa.makeCGColor(0xFFFFFF, 0.02);
+            defer cocoa.CGColorRelease(alt_bg);
+            cocoa.CGContextSetFillColorWithColor(ctx, alt_bg);
+            cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(4, row_y + 1, bounds.w - 8, row_h - 2));
+        }
+
+        // Checkbox (Collector Basket toggle)
+        const is_checked = state.selected_indices.get(r_idx) orelse false;
+        const box_rect = cocoa.NSRect.init(10, row_y + 7, 14, 14);
+        const box_border = cocoa.makeCGColor(0x00E5FF, if (is_checked) 1.0 else 0.4);
+        defer cocoa.CGColorRelease(box_border);
+        cocoa.CGContextSetStrokeColorWithColor(ctx, box_border);
+        cocoa.CGContextSetLineWidth(ctx, 1.0);
+        cocoa.CGContextStrokeRect(ctx, box_rect);
+
+        if (is_checked) {
+            const check_fill = cocoa.makeCGColor(0x00E5FF, 0.95);
+            defer cocoa.CGColorRelease(check_fill);
+            cocoa.CGContextSetFillColorWithColor(ctx, check_fill);
+            cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(13, row_y + 10, 8, 8));
+        }
+
+        // Category dot
+        const dot_color = cocoa.makeCGColor(child.category.colorHex(), 0.95);
+        defer cocoa.CGColorRelease(dot_color);
+        cocoa.CGContextSetFillColorWithColor(ctx, dot_color);
+        cocoa.CGContextFillEllipseInRect(ctx, cocoa.NSRect.init(34, row_y + 10, 8, 8));
+
+        // Name
+        var name_buf: [128]u8 = undefined;
+        const is_dir = child.isDirectory();
+        const prefix: []const u8 = if (is_dir) "📁 " else "  ";
+        const max_name_chars: usize = @intFromFloat(@max(10.0, (name_w - 30.0) / 8.0));
+        const child_name = if (child.name.len > max_name_chars) child.name[0..max_name_chars] else child.name;
+        const disp_name = std.fmt.bufPrint(&name_buf, "{s}{s}", .{ prefix, child_name }) catch child.name;
+
+        if (is_dir) {
+            cocoa.drawStringWithColor(disp_name, 48, row_y + 7, 0.95, 0.96, 0.99, 1.0);
+        } else {
+            cocoa.drawStringWithColor(disp_name, 48, row_y + 7, 0.82, 0.86, 0.92, 1.0);
+        }
+
+        // Logical Size
+        var row_sz_b: [32]u8 = undefined;
+        const row_sz = types.DiskNode.formatSize(child.size_bytes, &row_sz_b);
+        if (child.size_bytes > 1_000_000_000) {
+            cocoa.drawStringWithColor(row_sz, size_x, row_y + 7, 0.88, 0.25, 0.98, 1.0); // Purple
+        } else if (child.size_bytes > 100_000_000) {
+            cocoa.drawStringWithColor(row_sz, size_x, row_y + 7, 1.0, 0.43, 0.25, 1.0); // Coral
+        } else {
+            cocoa.drawStringWithColor(row_sz, size_x, row_y + 7, 0.0, 0.90, 1.0, 1.0); // Cyan
+        }
+
+        // Physical Blocks (APFS CoW indicator)
+        var blk_b: [32]u8 = undefined;
+        const blk_str = types.DiskNode.formatSize(child.allocated_bytes, &blk_b);
+        if (child.allocated_bytes < child.size_bytes and child.size_bytes > 4096) {
+            var cow_b: [48]u8 = undefined;
+            const cow_s = std.fmt.bufPrint(&cow_b, "{s} [CoW]", .{blk_str}) catch blk_str;
+            cocoa.drawStringWithColor(cow_s, blocks_x, row_y + 7, 0.0, 0.90, 0.46, 1.0); // Emerald Green
+        } else {
+            cocoa.drawStringWithColor(blk_str, blocks_x, row_y + 7, 0.55, 0.60, 0.68, 1.0);
+        }
+
+        // Category Tag
+        cocoa.drawStringWithColor(child.category.displayName(), cat_x, row_y + 7, 0.70, 0.74, 0.80, 1.0);
+
+        // Modified Relative Date
+        const entropy = types.TemporalEntropy.calculate(child.mtime_ns, now_ns);
+        var age_b: [32]u8 = undefined;
+        const age_str = if (entropy.days_old < 1.0)
+            "< 24h ago"
+        else if (entropy.days_old < 30.0)
+            std.fmt.bufPrint(&age_b, "{d:.0}d ago", .{entropy.days_old}) catch "recent"
+        else if (entropy.days_old < 365.0)
+            std.fmt.bufPrint(&age_b, "{d:.0}mo ago", .{entropy.days_old / 30.0}) catch "stale"
+        else
+            std.fmt.bufPrint(&age_b, "{d:.1}y ago", .{entropy.days_old / 365.0}) catch "iceberg";
+        cocoa.drawStringWithColor(age_str, mod_x, row_y + 7, 0.55, 0.60, 0.68, 1.0);
+
+        // Row hairline divider
+        cocoa.CGContextBeginPath(ctx);
+        cocoa.CGContextMoveToPoint(ctx, 4, row_y);
+        cocoa.CGContextAddLineToPoint(ctx, bounds.w - 4, row_y);
+        cocoa.CGContextDrawPath(ctx, 2);
+    }
+
+    // Scrollbar Thumb
+    if (total_content_h > table_h) {
+        const thumb_h = @max(24.0, (table_h / total_content_h) * table_h);
+        const thumb_y = table_top - (state.scroll_offset_y / max_scroll) * (table_h - thumb_h) - thumb_h;
+        const thumb_color = cocoa.makeCGColor(0x00E5FF, 0.45);
+        defer cocoa.CGColorRelease(thumb_color);
+        cocoa.CGContextSetFillColorWithColor(ctx, thumb_color);
+        cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(bounds.w - 5, thumb_y, 3, thumb_h));
+    }
+}
+
+fn onSuperFinderMouseDown(self: cocoa.id, click_point: cocoa.NSPoint, bounds: cocoa.NSRect, state: *UIState, event: cocoa.id) void {
+    if (state.scan_state == .idle) {
+        handlePresetsClick(click_point, bounds, state, bounds.h - 245.0);
+        return;
+    }
+    const node = state.drill_node orelse state.root_node orelse return;
+
+    // 1. Breadcrumb bar clicks (Top 36px)
+    const crumb_bar_h: f64 = 36.0;
+    const crumb_bar_y: f64 = bounds.h - crumb_bar_h;
+    if (click_point.y >= crumb_bar_y and click_point.y <= bounds.h) {
+        if (state.drill_node != null and click_point.x >= 16.0 and click_point.x <= 82.0) {
+            // [ ⮌ BACK ] button clicked
+            state.drill_node = state.drill_node.?.parent;
+            state.selected_node = state.drill_node;
+            state.scroll_offset_y = 0.0;
+            cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
+            requestRedraw();
+            return;
+        }
+        return;
+    }
+
+    // 2. Column Headers Bar clicks (Sort toggles)
+    const header_h: f64 = 28.0;
+    const header_y: f64 = crumb_bar_y - header_h;
+    if (click_point.y >= header_y and click_point.y < crumb_bar_y) {
+        const fixed_right: f64 = 520.0;
+        const name_w: f64 = @max(160.0, bounds.w - 36.0 - fixed_right);
+        const name_x: f64 = 36.0;
+        const size_x: f64 = name_x + name_w;
+        const blocks_x: f64 = size_x + 100.0;
+        const cat_x: f64 = blocks_x + 110.0;
+        const mod_x: f64 = cat_x + 130.0;
+
+        if (click_point.x >= name_x and click_point.x < size_x) {
+            if (state.sort_col == .name) state.sort_dir = if (state.sort_dir == .ascending) .descending else .ascending else {
+                state.sort_col = .name;
+                state.sort_dir = .ascending;
+            }
+        } else if (click_point.x >= size_x and click_point.x < blocks_x) {
+            if (state.sort_col == .size) state.sort_dir = if (state.sort_dir == .ascending) .descending else .ascending else {
+                state.sort_col = .size;
+                state.sort_dir = .descending;
+            }
+        } else if (click_point.x >= blocks_x and click_point.x < cat_x) {
+            if (state.sort_col == .blocks) state.sort_dir = if (state.sort_dir == .ascending) .descending else .ascending else {
+                state.sort_col = .blocks;
+                state.sort_dir = .descending;
+            }
+        } else if (click_point.x >= cat_x and click_point.x < mod_x) {
+            if (state.sort_col == .category) state.sort_dir = if (state.sort_dir == .ascending) .descending else .ascending else {
+                state.sort_col = .category;
+                state.sort_dir = .ascending;
+            }
+        } else if (click_point.x >= mod_x) {
+            if (state.sort_col == .modified) state.sort_dir = if (state.sort_dir == .ascending) .descending else .ascending else {
+                state.sort_col = .modified;
+                state.sort_dir = .descending;
+            }
+        }
+        sortDiskNodes(node.children.items, state.sort_col, state.sort_dir);
+        cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
+        return;
+    }
+
+    // 3. Table Rows clicks
+    if (click_point.y < header_y) {
+        const row_h: f64 = 28.0;
+        const rel_y = header_y - click_point.y + state.scroll_offset_y;
+        if (rel_y < 0.0) return;
+        const idx = @as(usize, @intFromFloat(@floor(rel_y / row_h)));
+        if (idx < node.children.items.len) {
+            const child = node.children.items[idx];
+            if (click_point.x <= 30.0) {
+                // Checkbox clicked
+                const cur = state.selected_indices.get(idx) orelse false;
+                state.selected_indices.put(idx, !cur) catch return;
+            } else {
+                // Row clicked
+                const click_count = cocoa.sendGetInt0(event, cocoa.sel_registerName("clickCount"));
+                if (child.isDirectory()) {
+                    if (click_count >= 2 or state.selected_node == child) {
+                        // Double-click or second click drills into folder
+                        state.drill_node = child;
+                        state.selected_node = child;
+                        state.scroll_offset_y = 0.0;
+                    } else {
+                        // Single-click selects folder to inspect in sidebar
+                        state.selected_node = child;
+                    }
+                } else {
+                    // File clicked: selects file to inspect in sidebar
+                    state.selected_node = child;
+                }
+            }
+            cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
+            requestRedraw();
+        }
+    }
+}
+
+// --- 3. Spacetime Visualizer (Workspace 6) ----------------------------------
+
+fn drawSpacetimeVisualizer(ctx: cocoa.CGContextRef, bounds: cocoa.NSRect, state: *UIState) void {
+    const node_opt = state.drill_node orelse state.root_node;
+    if (node_opt == null or state.scan_state == .idle) {
+        cocoa.drawStringWithColor("Run disk analysis to view radial spacetime and treemap geometry.", bounds.w / 2.0 - 200, bounds.h / 2.0, 0.55, 0.60, 0.68, 1.0);
+        return;
+    }
+    const node = node_opt.?;
+
+    // Top half: Sunburst
+    const sun_bounds = cocoa.NSRect.init(0, bounds.h * 0.45, bounds.w, bounds.h * 0.55);
+    const center_x = sun_bounds.w / 2.0;
+    const center_y = sun_bounds.y + sun_bounds.h / 2.0;
+
     var layout = sunburst.SunburstLayout.init(state.allocator);
-    layout.center_radius = 45.0;
-    layout.ring_thickness = 28.0;
+    layout.center_radius = 40.0;
+    layout.ring_thickness = 26.0;
 
     var arcs = layout.generateLayout(node) catch return;
     defer arcs.deinit(state.allocator);
 
-    if (arcs.items.len == 0) {
-        cocoa.drawStringWithColor("No files found or empty directory.", center_x - 110, center_y - 7, 0.56, 0.61, 0.68, 1.0);
-        return;
-    }
-
     for (arcs.items) |arc| {
         cocoa.CGContextBeginPath(ctx);
-        // Outer arc
         cocoa.CGContextAddArc(ctx, center_x, center_y, arc.outer_radius, arc.start_angle_rad, arc.end_angle_rad, 0);
-        // Inner arc (reverse direction)
         cocoa.CGContextAddArc(ctx, center_x, center_y, arc.inner_radius, arc.end_angle_rad, arc.start_angle_rad, 1);
         cocoa.CGContextClosePath(ctx);
 
         const arc_color = cocoa.makeCGColor(arc.color, if (arc.depth == 0) 0.85 else 0.75);
         defer cocoa.CGColorRelease(arc_color);
         cocoa.CGContextSetFillColorWithColor(ctx, arc_color);
-        cocoa.CGContextDrawPath(ctx, 0); // fill
-
-        // Wedge separator border
-        const stroke_color = cocoa.makeCGColor(0x08090D, 0.9);
-        defer cocoa.CGColorRelease(stroke_color);
-        cocoa.CGContextSetStrokeColorWithColor(ctx, stroke_color);
-        cocoa.CGContextSetLineWidth(ctx, 1.0);
-        cocoa.CGContextDrawPath(ctx, 2); // stroke
+        cocoa.CGContextDrawPath(ctx, 0);
     }
 
-    // Center Core (Drill ascending target)
-    const core_color = cocoa.makeCGColor(0x181B22, 1.0);
-    defer cocoa.CGColorRelease(core_color);
-    cocoa.CGContextSetFillColorWithColor(ctx, core_color);
-    cocoa.CGContextFillEllipseInRect(ctx, cocoa.NSRect.init(center_x - 35, center_y - 35, 70, 70));
-
-    const core_ring = cocoa.makeCGColor(0x00E5FF, 0.4);
-    defer cocoa.CGColorRelease(core_ring);
-    cocoa.CGContextSetStrokeColorWithColor(ctx, core_ring);
-    cocoa.CGContextSetLineWidth(ctx, 1.5);
-    cocoa.CGContextStrokeEllipseInRect(ctx, cocoa.NSRect.init(center_x - 35, center_y - 35, 70, 70));
-}
-
-fn onSunburstMouseDown(self: cocoa.id, _: cocoa.SEL, _: cocoa.id) callconv(.c) void {
-    const state = global_ui_state orelse return;
-    // Drill logic: toggle drill root or ascend
-    if (state.drill_node != null) {
-        state.drill_node = null; // ascend back to root
-    } else if (state.root_node) |r| {
-        if (r.children.items.len > 0) {
-            state.drill_node = r.children.items[0]; // drill into largest subtree
-        }
-    }
-    cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
-}
-
-// --- 3. TreemapView: Squarified CoreGraphics Treemap -----------------------
-
-fn drawTreemapRect(self: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.c) void {
-    _ = dirty;
-    const ctx = cocoa.getCurrentGraphicsContext() orelse return;
-    cocoa.CGContextSaveGState(ctx);
-    defer cocoa.CGContextRestoreGState(ctx);
-
-    const bounds = cocoa.sendGetRect(self, sel_bounds);
-
-    // Background #0B0C10
-    const bg_color = cocoa.makeCGColor(0x0B0C10, 1.0);
-    defer cocoa.CGColorRelease(bg_color);
-    cocoa.CGContextSetFillColorWithColor(ctx, bg_color);
-    cocoa.CGContextFillRect(ctx, bounds);
-    const state = global_ui_state orelse return;
-    if (state.active_tab != .super_finder and state.active_tab != .spacetime_visualizer) {
-        drawWorkspacePlaceholder(ctx, bounds, state.active_tab);
-        return;
-    }
-    const node_opt = state.drill_node orelse state.root_node;
-
-    if (node_opt == null or state.scan_state == .idle) {
-        if (state.scan_state == .idle) {
-            // Section Header
-            cocoa.drawStringWithColor("QUICK TARGET PRESETS  —  Select location to inspect:", 36, bounds.h - 35, 0.85, 0.88, 0.94, 1.0);
-
-            const card_w: f64 = (bounds.w - 72.0 - 16.0) / 2.0;
-            const card_h: f64 = 52.0;
-            const col1_x: f64 = 36.0;
-            const col2_x: f64 = 36.0 + card_w + 16.0;
-            const row1_y: f64 = bounds.h - 96.0;
-            const row2_y: f64 = bounds.h - 156.0;
-            const row3_y: f64 = bounds.h - 206.0;
-            const row3_w: f64 = card_w * 2.0 + 16.0;
-            const row3_h: f64 = 38.0;
-
-            const cur_target = state.getTargetPath();
-
-            // Card 1: 📥 Downloads
-            const in_dl = std.mem.endsWith(u8, cur_target, "Downloads");
-            renderPresetCard(ctx, col1_x, row1_y, card_w, card_h, "📥  Downloads Folder", "~/Downloads • DMGs, ZIPs, installers", in_dl);
-
-            // Card 2: 💼 Developer Projects
-            const in_proj = std.mem.endsWith(u8, cur_target, "LocalBuilds") or std.mem.endsWith(u8, cur_target, "Projects");
-            renderPresetCard(ctx, col2_x, row1_y, card_w, card_h, "💼  Developer Projects", "~/LocalBuilds • Node_modules, build artifacts", in_proj);
-
-            // Card 3: 💻 Applications
-            const in_apps = std.mem.eql(u8, cur_target, "/Applications");
-            renderPresetCard(ctx, col1_x, row2_y, card_w, card_h, "💻  System Applications", "/Applications • Installed app bundles", in_apps);
-
-            // Card 4: 🏠 User Home
-            const in_home = !in_dl and !in_proj and !in_apps and (std.mem.startsWith(u8, cur_target, "/Users/") or std.mem.eql(u8, cur_target, "~"));
-            renderPresetCard(ctx, col2_x, row2_y, card_w, card_h, "🏠  User Home Profile", "~/ • Full user profile & caches", in_home);
-
-            // Card 5: 📁 Browse Folder
-            const r5_rect = cocoa.NSRect.init(col1_x, row3_y, row3_w, row3_h);
-            const r5_bg = cocoa.makeCGColor(0x141824, 0.95);
-            defer cocoa.CGColorRelease(r5_bg);
-            cocoa.CGContextSetFillColorWithColor(ctx, r5_bg);
-            cocoa.CGContextFillRect(ctx, r5_rect);
-
-            const r5_border = cocoa.makeCGColor(0x00E5FF, 0.5);
-            defer cocoa.CGColorRelease(r5_border);
-            cocoa.CGContextSetStrokeColorWithColor(ctx, r5_border);
-            cocoa.CGContextSetLineWidth(ctx, 1.2);
-            cocoa.CGContextStrokeRect(ctx, r5_rect);
-
-            cocoa.drawStringWithColor("📁  Browse Custom Folder or External Drive... (⌘O)", col1_x + 20, row3_y + 11, 0.0, 0.90, 1.0, 1.0);
-        } else if (state.scan_state == .scanning) {
-            cocoa.drawStringWithColor("Generating squarified treemap...", bounds.w / 2.0 - 100, bounds.h / 2.0 - 7, 0.0, 0.90, 1.0, 1.0);
-        } else {
-            cocoa.drawStringWithColor("No files found to visualize in treemap.", bounds.w / 2.0 - 120, bounds.h / 2.0 - 7, 0.56, 0.61, 0.68, 1.0);
-        }
-        return;
-    }
-
-    const node = node_opt.?;
-    var layout = treemap.TreemapLayout.init(state.allocator);
-    var rects = layout.layout(node, 2.0, 2.0, @floatCast(bounds.w - 4.0), @floatCast(bounds.h - 4.0)) catch return;
+    // Bottom half: Treemap
+    const tree_h = bounds.h * 0.45 - 10.0;
+    var t_layout = treemap.TreemapLayout.init(state.allocator);
+    var rects = t_layout.layout(node, 4.0, 4.0, @floatCast(bounds.w - 8.0), @floatCast(tree_h)) catch return;
     defer rects.deinit(state.allocator);
-
-    if (rects.items.len == 0) {
-        cocoa.drawStringWithColor("No files found to visualize in treemap.", bounds.w / 2.0 - 120, bounds.h / 2.0 - 7, 0.56, 0.61, 0.68, 1.0);
-        return;
-    }
 
     for (rects.items) |r| {
         const rect = cocoa.NSRect.init(r.x, r.y, r.w, r.h);
-
-        // Fill rectangle
         const fill_col = cocoa.makeCGColor(r.color, 0.70);
         defer cocoa.CGColorRelease(fill_col);
         cocoa.CGContextSetFillColorWithColor(ctx, fill_col);
         cocoa.CGContextFillRect(ctx, rect);
 
-        // Subtle borders
         const border_col = cocoa.makeCGColor(0x181B22, 0.95);
         defer cocoa.CGColorRelease(border_col);
         cocoa.CGContextSetStrokeColorWithColor(ctx, border_col);
@@ -612,50 +809,394 @@ fn drawTreemapRect(self: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.
     }
 }
 
-fn renderPresetCard(ctx: cocoa.CGContextRef, x: f64, y: f64, w: f64, h: f64, title: []const u8, sub: []const u8, selected: bool) void {
-    const rect = cocoa.NSRect.init(x, y, w, h);
-    const bg_hex: u32 = if (selected) 0x14202C else 0x11141B;
-    const bg_color = cocoa.makeCGColor(bg_hex, 0.95);
+fn onSpacetimeMouseDown(self: cocoa.id, click_point: cocoa.NSPoint, bounds: cocoa.NSRect, state: *UIState) void {
+    _ = bounds;
+    _ = click_point;
+    if (state.drill_node != null) {
+        state.drill_node = null;
+    } else if (state.root_node) |r| {
+        if (r.children.items.len > 0) state.drill_node = r.children.items[0];
+    }
+    cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
+    requestRedraw();
+}
+
+// --- 4. Main Stage View Subclass -------------------------------------------
+
+fn drawStageRect(self: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.c) void {
+    _ = dirty;
+    const ctx = cocoa.getCurrentGraphicsContext() orelse return;
+    cocoa.CGContextSaveGState(ctx);
+    defer cocoa.CGContextRestoreGState(ctx);
+
+    const bounds = cocoa.sendGetRect(self, sel_bounds);
+
+    // Deep Stage Background #0B0C10
+    const bg_color = cocoa.makeCGColor(0x0B0C10, 1.0);
     defer cocoa.CGColorRelease(bg_color);
     cocoa.CGContextSetFillColorWithColor(ctx, bg_color);
-    cocoa.CGContextFillRect(ctx, rect);
+    cocoa.CGContextFillRect(ctx, bounds);
 
-    const border_hex: u32 = if (selected) 0x00E5FF else 0x222834;
-    const border_color = cocoa.makeCGColor(border_hex, if (selected) 0.95 else 0.8);
-    defer cocoa.CGColorRelease(border_color);
-    cocoa.CGContextSetStrokeColorWithColor(ctx, border_color);
-    cocoa.CGContextSetLineWidth(ctx, if (selected) 1.5 else 1.0);
-    cocoa.CGContextStrokeRect(ctx, rect);
-
-    cocoa.drawStringWithColor(title, x + 16, y + 29, if (selected) 0.0 else 0.90, if (selected) 0.90 else 0.93, 1.0, 1.0);
-    cocoa.drawStringWithColor(sub, x + 16, y + 10, 0.55, 0.60, 0.68, 1.0);
-
-    if (selected) {
-        cocoa.drawStringWithColor("● SELECTED", x + w - 95, y + 29, 0.0, 0.90, 1.0, 1.0);
+    const state = global_ui_state orelse return;
+    switch (state.active_tab) {
+        .super_finder => drawSuperFinder(ctx, bounds, state),
+        .spacetime_visualizer => drawSpacetimeVisualizer(ctx, bounds, state),
+        else => drawWorkspacePlaceholder(ctx, bounds, state.active_tab),
     }
 }
 
-fn onTreemapMouseDown(self: cocoa.id, _: cocoa.SEL, event: cocoa.id) callconv(.c) void {
+fn onStageMouseDown(self: cocoa.id, _: cocoa.SEL, event: cocoa.id) callconv(.c) void {
     const state = global_ui_state orelse return;
-    if (state.scan_state != .idle) return;
-
     const sel_location = cocoa.sel_registerName("locationInWindow");
     const F_loc = *const fn (cocoa.id, cocoa.SEL) callconv(.c) cocoa.NSPoint;
     const window_point = @as(F_loc, @ptrCast(&cocoa.objc_msgSend))(event, sel_location);
 
     const sel_convertPoint = cocoa.sel_registerName("convertPoint:fromView:");
     const click_point = cocoa.sendConvertPointFromView(self, sel_convertPoint, window_point, null);
+    const bounds = cocoa.sendGetRect(self, sel_bounds);
+
+    switch (state.active_tab) {
+        .super_finder => onSuperFinderMouseDown(self, click_point, bounds, state, event),
+        .spacetime_visualizer => onSpacetimeMouseDown(self, click_point, bounds, state),
+        else => {},
+    }
+}
+
+fn onStageScrollWheel(self: cocoa.id, _: cocoa.SEL, event: cocoa.id) callconv(.c) void {
+    const state = global_ui_state orelse return;
+    const sel_deltaY = cocoa.sel_registerName("scrollingDeltaY");
+    const F_delta = *const fn (cocoa.id, cocoa.SEL) callconv(.c) f64;
+    const dy = @as(F_delta, @ptrCast(&cocoa.objc_msgSend))(event, sel_deltaY);
+
+    state.scroll_offset_y = @max(0.0, state.scroll_offset_y - dy);
+    cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
+}
+
+// --- 5. SidebarView: File Inspector & Target Presets -----------------------
+
+fn drawSidebarRect(self: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.c) void {
+    _ = dirty;
+    const ctx = cocoa.getCurrentGraphicsContext() orelse return;
+    cocoa.CGContextSaveGState(ctx);
+    defer cocoa.CGContextRestoreGState(ctx);
 
     const bounds = cocoa.sendGetRect(self, sel_bounds);
+
+    // Surface panel #101216
+    const bg_color = cocoa.makeCGColor(0x101216, 1.0);
+    defer cocoa.CGColorRelease(bg_color);
+    cocoa.CGContextSetFillColorWithColor(ctx, bg_color);
+    cocoa.CGContextFillRect(ctx, bounds);
+
+    // Left border divider
+    const line_color = cocoa.makeCGColor(0x282C37, 0.8);
+    defer cocoa.CGColorRelease(line_color);
+    cocoa.CGContextSetStrokeColorWithColor(ctx, line_color);
+    cocoa.CGContextSetLineWidth(ctx, 1.0);
+    cocoa.CGContextBeginPath(ctx);
+    cocoa.CGContextMoveToPoint(ctx, 0, 0);
+    cocoa.CGContextAddLineToPoint(ctx, 0, bounds.h);
+    cocoa.CGContextDrawPath(ctx, 2);
+
+    const state = global_ui_state orelse return;
+    const card_x: f64 = 18.0;
+    const card_w: f64 = bounds.w - 36.0;
+
+    if (state.scan_state == .idle or (state.root_node == null and state.drill_node == null)) {
+        // Presets & Idle HUD
+        cocoa.drawStringWithColor("TARGET & TELEMETRY", 24, bounds.h - 35, 0.90, 0.93, 0.96, 1.0);
+
+        const t_rect = cocoa.NSRect.init(card_x, bounds.h - 120.0, card_w, 70.0);
+        const t_bg = cocoa.makeCGColor(0x13161F, 0.95);
+        defer cocoa.CGColorRelease(t_bg);
+        cocoa.CGContextSetFillColorWithColor(ctx, t_bg);
+        cocoa.CGContextFillRect(ctx, t_rect);
+
+        const t_border = cocoa.makeCGColor(0x222834, 0.9);
+        defer cocoa.CGColorRelease(t_border);
+        cocoa.CGContextSetStrokeColorWithColor(ctx, t_border);
+        cocoa.CGContextSetLineWidth(ctx, 1.0);
+        cocoa.CGContextStrokeRect(ctx, t_rect);
+
+        cocoa.drawStringWithColor("SELECTED DIRECTORY:", card_x + 16, bounds.h - 96.0, 0.45, 0.50, 0.58, 1.0);
+        const cur_tgt = state.getTargetPath();
+        const tgt_disp = if (cur_tgt.len > 28) cur_tgt[0..28] else cur_tgt;
+        cocoa.drawStringWithColor(tgt_disp, card_x + 16, bounds.h - 114.0, 0.0, 0.90, 1.0, 1.0);
+
+        // Action Button 1: Begin Analysis
+        const btn1_y = bounds.h - 175.0;
+        const btn1_h = 42.0;
+        const btn1_rect = cocoa.NSRect.init(card_x, btn1_y, card_w, btn1_h);
+
+        const btn1_bg = cocoa.makeCGColor(0x00E5FF, 0.20);
+        defer cocoa.CGColorRelease(btn1_bg);
+        cocoa.CGContextSetFillColorWithColor(ctx, btn1_bg);
+        cocoa.CGContextFillRect(ctx, btn1_rect);
+
+        const btn1_border = cocoa.makeCGColor(0x00E5FF, 0.95);
+        defer cocoa.CGColorRelease(btn1_border);
+        cocoa.CGContextSetStrokeColorWithColor(ctx, btn1_border);
+        cocoa.CGContextSetLineWidth(ctx, 1.5);
+        cocoa.CGContextStrokeRect(ctx, btn1_rect);
+
+        cocoa.drawStringWithColor("▶   BEGIN ANALYSIS (⌘R)", card_x + (card_w - 200.0) / 2.0, btn1_y + 13.0, 0.0, 0.90, 1.0, 1.0);
+
+        // Action Button 2: Choose Target Folder
+        const btn2_y = bounds.h - 228.0;
+        const btn2_h = 38.0;
+        const btn2_rect = cocoa.NSRect.init(card_x, btn2_y, card_w, btn2_h);
+
+        const btn2_bg = cocoa.makeCGColor(0x161A24, 0.95);
+        defer cocoa.CGColorRelease(btn2_bg);
+        cocoa.CGContextSetFillColorWithColor(ctx, btn2_bg);
+        cocoa.CGContextFillRect(ctx, btn2_rect);
+
+        const btn2_border = cocoa.makeCGColor(0x3B4455, 0.85);
+        defer cocoa.CGColorRelease(btn2_border);
+        cocoa.CGContextSetStrokeColorWithColor(ctx, btn2_border);
+        cocoa.CGContextSetLineWidth(ctx, 1.2);
+        cocoa.CGContextStrokeRect(ctx, btn2_rect);
+
+        cocoa.drawStringWithColor("📁   CHOOSE TARGET (⌘O)", card_x + (card_w - 190.0) / 2.0, btn2_y + 11.0, 0.85, 0.88, 0.94, 1.0);
+
+        // Shortcuts Guide
+        const sc_y = bounds.h - 400.0;
+        const sc_h = 135.0;
+        const sc_rect = cocoa.NSRect.init(card_x, sc_y, card_w, sc_h);
+        const sc_bg = cocoa.makeCGColor(0x10131A, 0.95);
+        defer cocoa.CGColorRelease(sc_bg);
+        cocoa.CGContextSetFillColorWithColor(ctx, sc_bg);
+        cocoa.CGContextFillRect(ctx, sc_rect);
+
+        const sc_border = cocoa.makeCGColor(0x1E232E, 0.85);
+        defer cocoa.CGColorRelease(sc_border);
+        cocoa.CGContextSetStrokeColorWithColor(ctx, sc_border);
+        cocoa.CGContextSetLineWidth(ctx, 1.0);
+        cocoa.CGContextStrokeRect(ctx, sc_rect);
+
+        cocoa.drawStringWithColor("QUICK SHORTCUTS:", card_x + 16, sc_y + 110, 0.85, 0.88, 0.94, 1.0);
+        cocoa.drawStringWithColor("⌘O  —  Choose custom target folder", card_x + 16, sc_y + 88, 0.55, 0.60, 0.68, 1.0);
+        cocoa.drawStringWithColor("⌘R  —  Run disk analysis", card_x + 16, sc_y + 68, 0.55, 0.60, 0.68, 1.0);
+        cocoa.drawStringWithColor("⌘1..8 — Switch workspace tab", card_x + 16, sc_y + 48, 0.55, 0.60, 0.68, 1.0);
+        cocoa.drawStringWithColor("⌘Q  —  Quit ZSpace", card_x + 16, sc_y + 28, 0.55, 0.60, 0.68, 1.0);
+        return;
+    }
+
+    // Active File Inspector
+    const target = state.selected_node orelse (state.drill_node orelse state.root_node.?);
+    cocoa.drawStringWithColor("FILE & TARGET INSPECTOR", 24, bounds.h - 35, 0.90, 0.93, 0.96, 1.0);
+
+    // 1. Identity Card
+    const id_y = bounds.h - 110.0;
+    const id_rect = cocoa.NSRect.init(card_x, id_y, card_w, 68.0);
+    renderCardBg(ctx, id_rect);
+
+    const is_dir = target.isDirectory();
+    const type_badge: []const u8 = if (is_dir) "DIRECTORY" else "FILE";
+    cocoa.drawStringWithColor(type_badge, card_x + 16, id_y + 48, 0.0, 0.90, 1.0, 1.0);
+
+    var name_b: [64]u8 = undefined;
+    const max_n: usize = @min(target.name.len, 28);
+    const id_name = std.fmt.bufPrint(&name_b, "{s}", .{target.name[0..max_n]}) catch target.name;
+    cocoa.drawStringWithColor(id_name, card_x + 16, id_y + 24, 0.95, 0.96, 0.99, 1.0);
+
+    // 2. Full Path Card
+    const p_y = bounds.h - 180.0;
+    const p_rect = cocoa.NSRect.init(card_x, p_y, card_w, 60.0);
+    renderCardBg(ctx, p_rect);
+    cocoa.drawStringWithColor("FULL PATH:", card_x + 16, p_y + 40, 0.48, 0.54, 0.62, 1.0);
+    const p_len = @min(target.path.len, 34);
+    cocoa.drawStringWithColor(target.path[0..p_len], card_x + 16, p_y + 18, 0.75, 0.80, 0.88, 1.0);
+
+    // 3. Storage & APFS Blocks Card
+    const s_y = bounds.h - 275.0;
+    const s_rect = cocoa.NSRect.init(card_x, s_y, card_w, 85.0);
+    renderCardBg(ctx, s_rect);
+
+    cocoa.drawStringWithColor("STORAGE ALLOCATION:", card_x + 16, s_y + 64, 0.48, 0.54, 0.62, 1.0);
+    var sz_b: [32]u8 = undefined;
+    var blk_b: [32]u8 = undefined;
+    const sz_str = types.DiskNode.formatSize(target.size_bytes, &sz_b);
+    const blk_str = types.DiskNode.formatSize(target.allocated_bytes, &blk_b);
+
+    var sz_line: [64]u8 = undefined;
+    const s_line = std.fmt.bufPrint(&sz_line, "Logical: {s}  •  Blocks: {s}", .{ sz_str, blk_str }) catch "";
+    cocoa.drawStringWithColor(s_line, card_x + 16, s_y + 42, 0.0, 0.90, 1.0, 1.0);
+
+    if (target.allocated_bytes < target.size_bytes and target.size_bytes > 4096) {
+        var sav_b: [32]u8 = undefined;
+        const sav_s = types.DiskNode.formatSize(target.size_bytes - target.allocated_bytes, &sav_b);
+        var sav_line: [64]u8 = undefined;
+        const sl = std.fmt.bufPrint(&sav_line, "APFS CoW / Sparse: {s} saved", .{sav_s}) catch "";
+        cocoa.drawStringWithColor(sl, card_x + 16, s_y + 18, 0.0, 0.90, 0.46, 1.0);
+    } else {
+        cocoa.drawStringWithColor("Physical blocks match logical size", card_x + 16, s_y + 18, 0.55, 0.60, 0.68, 1.0);
+    }
+
+    // 4. Protection & Category
+    const pr_y = bounds.h - 355.0;
+    const pr_rect = cocoa.NSRect.init(card_x, pr_y, card_w, 70.0);
+    renderCardBg(ctx, pr_rect);
+    cocoa.drawStringWithColor("STATUS & PROTECTION:", card_x + 16, pr_y + 50, 0.48, 0.54, 0.62, 1.0);
+
+    const prot_lbl = target.protection.label();
+    if (target.protection.isProtected()) {
+        cocoa.drawStringWithColor(prot_lbl, card_x + 16, pr_y + 26, 1.0, 0.43, 0.25, 1.0); // Coral
+    } else {
+        cocoa.drawStringWithColor(prot_lbl, card_x + 16, pr_y + 26, 0.0, 0.90, 0.46, 1.0); // Emerald Green
+    }
+
+    // 5. Actions Buttons
+    const act1_y = bounds.h - 410.0;
+    const act1_rect = cocoa.NSRect.init(card_x, act1_y, card_w, 36.0);
+    renderButton(ctx, act1_rect, "📋  COPY PATH TO CLIPBOARD", 0x141824, 0x00E5FF);
+
+    const act2_y = bounds.h - 456.0;
+    const act2_rect = cocoa.NSRect.init(card_x, act2_y, card_w, 36.0);
+    if (target.protection.isProtected()) {
+        renderButton(ctx, act2_rect, "🔒  PROTECTED (CANNOT TRASH)", 0x181414, 0x553333);
+    } else {
+        renderButton(ctx, act2_rect, "🗑  MOVE ITEM TO TRASH", 0x221313, 0xFF3D00);
+    }
+}
+
+fn renderCardBg(ctx: cocoa.CGContextRef, rect: cocoa.NSRect) void {
+    const bg = cocoa.makeCGColor(0x13161F, 0.95);
+    defer cocoa.CGColorRelease(bg);
+    cocoa.CGContextSetFillColorWithColor(ctx, bg);
+    cocoa.CGContextFillRect(ctx, rect);
+
+    const border = cocoa.makeCGColor(0x222834, 0.9);
+    defer cocoa.CGColorRelease(border);
+    cocoa.CGContextSetStrokeColorWithColor(ctx, border);
+    cocoa.CGContextSetLineWidth(ctx, 1.0);
+    cocoa.CGContextStrokeRect(ctx, rect);
+}
+
+fn renderButton(ctx: cocoa.CGContextRef, rect: cocoa.NSRect, label: []const u8, bg_hex: u32, border_hex: u32) void {
+    const bg = cocoa.makeCGColor(bg_hex, 0.95);
+    defer cocoa.CGColorRelease(bg);
+    cocoa.CGContextSetFillColorWithColor(ctx, bg);
+    cocoa.CGContextFillRect(ctx, rect);
+
+    const border = cocoa.makeCGColor(border_hex, 0.9);
+    defer cocoa.CGColorRelease(border);
+    cocoa.CGContextSetStrokeColorWithColor(ctx, border);
+    cocoa.CGContextSetLineWidth(ctx, 1.2);
+    cocoa.CGContextStrokeRect(ctx, rect);
+
+    cocoa.drawStringWithColor(label, rect.x + 20.0, rect.y + 10.0, 0.90, 0.93, 0.96, 1.0);
+}
+
+fn onSidebarMouseDown(self: cocoa.id, _: cocoa.SEL, event: cocoa.id) callconv(.c) void {
+    const state = global_ui_state orelse return;
+    const sel_location = cocoa.sel_registerName("locationInWindow");
+    const F_loc = *const fn (cocoa.id, cocoa.SEL) callconv(.c) cocoa.NSPoint;
+    const window_point = @as(F_loc, @ptrCast(&cocoa.objc_msgSend))(event, sel_location);
+
+    const sel_convertPoint = cocoa.sel_registerName("convertPoint:fromView:");
+    const click_point = cocoa.sendConvertPointFromView(self, sel_convertPoint, window_point, null);
+    const bounds = cocoa.sendGetRect(self, sel_bounds);
+
+    if (state.scan_state == .idle or (state.root_node == null and state.drill_node == null)) {
+        const card_x: f64 = 18.0;
+        const card_w: f64 = bounds.w - 36.0;
+
+        // Button 1: Begin Analysis (⌘R)
+        const btn1_y = bounds.h - 175.0;
+        const btn1_h = 42.0;
+        if (click_point.x >= card_x and click_point.x <= card_x + card_w and
+            click_point.y >= btn1_y and click_point.y <= btn1_y + btn1_h)
+        {
+            if (state.scan_trigger_fn) |trigger| trigger();
+            return;
+        }
+
+        // Button 2: Choose Target (⌘O)
+        const btn2_y = bounds.h - 228.0;
+        const btn2_h = 38.0;
+        if (click_point.x >= card_x and click_point.x <= card_x + card_w and
+            click_point.y >= btn2_y and click_point.y <= btn2_y + btn2_h)
+        {
+            if (state.choose_target_fn) |choose| choose();
+            return;
+        }
+        return;
+    }
+
+    const card_x: f64 = 18.0;
+    const card_w: f64 = bounds.w - 36.0;
+    const target = state.selected_node orelse (state.drill_node orelse state.root_node.?);
+
+    // Action 1: Copy Path
+    const act1_y = bounds.h - 410.0;
+    if (click_point.x >= card_x and click_point.x <= card_x + card_w and
+        click_point.y >= act1_y and click_point.y <= act1_y + 36.0)
+    {
+        cocoa.copyToClipboard(target.path);
+        return;
+    }
+
+    // Action 2: Trash item
+    const act2_y = bounds.h - 456.0;
+    if (click_point.x >= card_x and click_point.x <= card_x + card_w and
+        click_point.y >= act2_y and click_point.y <= act2_y + 36.0)
+    {
+        if (!target.protection.isProtected()) {
+            if (state.trash_node_fn) |trash| trash(target);
+        }
+        return;
+    }
+}
+
+fn onSidebarScrollWheel(self: cocoa.id, _: cocoa.SEL, event: cocoa.id) callconv(.c) void {
+    const state = global_ui_state orelse return;
+    const sel_deltaY = cocoa.sel_registerName("scrollingDeltaY");
+    const F_delta = *const fn (cocoa.id, cocoa.SEL) callconv(.c) f64;
+    const dy = @as(F_delta, @ptrCast(&cocoa.objc_msgSend))(event, sel_deltaY);
+
+    state.sidebar_scroll_offset_y = @max(0.0, state.sidebar_scroll_offset_y - dy);
+    cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
+}
+
+// --- Presets Helper --------------------------------------------------------
+
+fn renderPresetsGrid(ctx: cocoa.CGContextRef, bounds: cocoa.NSRect, state: *const UIState, start_y: f64) void {
     const card_w: f64 = (bounds.w - 72.0 - 16.0) / 2.0;
     const card_h: f64 = 52.0;
     const col1_x: f64 = 36.0;
     const col2_x: f64 = 36.0 + card_w + 16.0;
-    const row1_y: f64 = bounds.h - 96.0;
-    const row2_y: f64 = bounds.h - 156.0;
-    const row3_y: f64 = bounds.h - 206.0;
+    const row1_y: f64 = start_y - card_h;
+    const row2_y: f64 = row1_y - card_h - 12.0;
+    const row3_y: f64 = row2_y - 42.0;
     const row3_w: f64 = card_w * 2.0 + 16.0;
-    const row3_h: f64 = 38.0;
+
+    const cur_target = state.getTargetPath();
+    const in_dl = std.mem.endsWith(u8, cur_target, "Downloads");
+    renderPresetCard(ctx, col1_x, row1_y, card_w, card_h, "📥  Downloads Folder", "~/Downloads • DMGs, ZIPs, installers", in_dl);
+
+    const in_proj = std.mem.endsWith(u8, cur_target, "LocalBuilds") or std.mem.endsWith(u8, cur_target, "Projects");
+    renderPresetCard(ctx, col2_x, row1_y, card_w, card_h, "💼  Developer Projects", "~/LocalBuilds • Node_modules, build artifacts", in_proj);
+
+    const in_apps = std.mem.eql(u8, cur_target, "/Applications");
+    renderPresetCard(ctx, col1_x, row2_y, card_w, card_h, "💻  System Applications", "/Applications • Installed app bundles", in_apps);
+
+    const in_home = !in_dl and !in_proj and !in_apps and (std.mem.startsWith(u8, cur_target, "/Users/") or std.mem.eql(u8, cur_target, "~"));
+    renderPresetCard(ctx, col2_x, row2_y, card_w, card_h, "🏠  User Home Profile", "~/ • Full user profile & caches", in_home);
+
+    const r5_rect = cocoa.NSRect.init(col1_x, row3_y, row3_w, 38.0);
+    renderButton(ctx, r5_rect, "📁  Browse Custom Folder or External Drive... (⌘O)", 0x141824, 0x00E5FF);
+}
+
+fn handlePresetsClick(click_point: cocoa.NSPoint, bounds: cocoa.NSRect, state: *UIState, start_y: f64) void {
+    const card_w: f64 = (bounds.w - 72.0 - 16.0) / 2.0;
+    const card_h: f64 = 52.0;
+    const col1_x: f64 = 36.0;
+    const col2_x: f64 = 36.0 + card_w + 16.0;
+    const row1_y: f64 = start_y - card_h;
+    const row2_y: f64 = row1_y - card_h - 12.0;
+    const row3_y: f64 = row2_y - 42.0;
+    const row3_w: f64 = card_w * 2.0 + 16.0;
 
     const home = getHomeDir();
 
@@ -697,263 +1238,37 @@ fn onTreemapMouseDown(self: cocoa.id, _: cocoa.SEL, event: cocoa.id) callconv(.c
 
     // Card 5: Browse Folder
     if (click_point.x >= col1_x and click_point.x <= col1_x + row3_w and
-        click_point.y >= row3_y and click_point.y <= row3_y + row3_h)
+        click_point.y >= row3_y and click_point.y <= row3_y + 38.0)
     {
         if (state.choose_target_fn) |f| f();
         return;
     }
 }
 
-// --- 4. SidebarView: Custom Draw for Files / Dupes / Wins ------------------
-
-fn drawSidebarRect(self: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.c) void {
-    _ = dirty;
-    const ctx = cocoa.getCurrentGraphicsContext() orelse return;
-    cocoa.CGContextSaveGState(ctx);
-    defer cocoa.CGContextRestoreGState(ctx);
-
-    const bounds = cocoa.sendGetRect(self, sel_bounds);
-
-    // Surface panel #101216
-    const bg_color = cocoa.makeCGColor(0x101216, 1.0);
+fn renderPresetCard(ctx: cocoa.CGContextRef, x: f64, y: f64, w: f64, h: f64, title: []const u8, sub: []const u8, selected: bool) void {
+    const rect = cocoa.NSRect.init(x, y, w, h);
+    const bg_hex: u32 = if (selected) 0x14202C else 0x11141B;
+    const bg_color = cocoa.makeCGColor(bg_hex, 0.95);
     defer cocoa.CGColorRelease(bg_color);
     cocoa.CGContextSetFillColorWithColor(ctx, bg_color);
-    cocoa.CGContextFillRect(ctx, bounds);
+    cocoa.CGContextFillRect(ctx, rect);
 
-    // Left border divider
-    const line_color = cocoa.makeCGColor(0x282C37, 0.8);
-    defer cocoa.CGColorRelease(line_color);
-    cocoa.CGContextSetStrokeColorWithColor(ctx, line_color);
-    cocoa.CGContextSetLineWidth(ctx, 1.0);
-    cocoa.CGContextBeginPath(ctx);
-    cocoa.CGContextMoveToPoint(ctx, 0, 0);
-    cocoa.CGContextAddLineToPoint(ctx, 0, bounds.h);
-    cocoa.CGContextDrawPath(ctx, 2);
+    const border_hex: u32 = if (selected) 0x00E5FF else 0x222834;
+    const border_color = cocoa.makeCGColor(border_hex, if (selected) 0.95 else 0.8);
+    defer cocoa.CGColorRelease(border_color);
+    cocoa.CGContextSetStrokeColorWithColor(ctx, border_color);
+    cocoa.CGContextSetLineWidth(ctx, if (selected) 1.5 else 1.0);
+    cocoa.CGContextStrokeRect(ctx, rect);
 
-    const state = global_ui_state orelse return;
-    const node_opt = state.drill_node orelse state.root_node;
+    cocoa.drawStringWithColor(title, x + 16, y + 29, if (selected) 0.0 else 0.90, if (selected) 0.90 else 0.93, 1.0, 1.0);
+    cocoa.drawStringWithColor(sub, x + 16, y + 10, 0.55, 0.60, 0.68, 1.0);
 
-    if (node_opt == null or state.scan_state == .idle) {
-        if (state.scan_state == .idle) {
-            // Header
-            cocoa.drawStringWithColor("TARGET & TELEMETRY", 24, bounds.h - 35, 0.90, 0.93, 0.96, 1.0);
-
-            const card_x: f64 = 18.0;
-            const card_w: f64 = bounds.w - 36.0;
-
-            // Target Info Card
-            const t_rect = cocoa.NSRect.init(card_x, bounds.h - 120.0, card_w, 70.0);
-            const t_bg = cocoa.makeCGColor(0x13161F, 0.95);
-            defer cocoa.CGColorRelease(t_bg);
-            cocoa.CGContextSetFillColorWithColor(ctx, t_bg);
-            cocoa.CGContextFillRect(ctx, t_rect);
-
-            const t_border = cocoa.makeCGColor(0x222834, 0.9);
-            defer cocoa.CGColorRelease(t_border);
-            cocoa.CGContextSetStrokeColorWithColor(ctx, t_border);
-            cocoa.CGContextSetLineWidth(ctx, 1.0);
-            cocoa.CGContextStrokeRect(ctx, t_rect);
-
-            cocoa.drawStringWithColor("SELECTED DIRECTORY:", card_x + 16, bounds.h - 96.0, 0.45, 0.50, 0.58, 1.0);
-            const cur_tgt = state.getTargetPath();
-            const tgt_disp = if (cur_tgt.len > 28) cur_tgt[0..28] else cur_tgt;
-            cocoa.drawStringWithColor(tgt_disp, card_x + 16, bounds.h - 114.0, 0.0, 0.90, 1.0, 1.0);
-
-            // Action Button 1: Begin Analysis
-            const btn1_y = bounds.h - 175.0;
-            const btn1_h = 42.0;
-            const btn1_rect = cocoa.NSRect.init(card_x, btn1_y, card_w, btn1_h);
-
-            const btn1_bg = cocoa.makeCGColor(0x00E5FF, 0.20);
-            defer cocoa.CGColorRelease(btn1_bg);
-            cocoa.CGContextSetFillColorWithColor(ctx, btn1_bg);
-            cocoa.CGContextFillRect(ctx, btn1_rect);
-
-            const btn1_border = cocoa.makeCGColor(0x00E5FF, 0.95);
-            defer cocoa.CGColorRelease(btn1_border);
-            cocoa.CGContextSetStrokeColorWithColor(ctx, btn1_border);
-            cocoa.CGContextSetLineWidth(ctx, 1.5);
-            cocoa.CGContextStrokeRect(ctx, btn1_rect);
-
-            cocoa.drawStringWithColor("▶   BEGIN ANALYSIS (⌘R)", card_x + (card_w - 200.0) / 2.0, btn1_y + 13.0, 0.0, 0.90, 1.0, 1.0);
-
-            // Action Button 2: Choose Target Folder
-            const btn2_y = bounds.h - 228.0;
-            const btn2_h = 38.0;
-            const btn2_rect = cocoa.NSRect.init(card_x, btn2_y, card_w, btn2_h);
-
-            const btn2_bg = cocoa.makeCGColor(0x161A24, 0.95);
-            defer cocoa.CGColorRelease(btn2_bg);
-            cocoa.CGContextSetFillColorWithColor(ctx, btn2_bg);
-            cocoa.CGContextFillRect(ctx, btn2_rect);
-
-            const btn2_border = cocoa.makeCGColor(0x3B4455, 0.85);
-            defer cocoa.CGColorRelease(btn2_border);
-            cocoa.CGContextSetStrokeColorWithColor(ctx, btn2_border);
-            cocoa.CGContextSetLineWidth(ctx, 1.2);
-            cocoa.CGContextStrokeRect(ctx, btn2_rect);
-
-            cocoa.drawStringWithColor("📁   CHOOSE TARGET (⌘O)", card_x + (card_w - 190.0) / 2.0, btn2_y + 11.0, 0.85, 0.88, 0.94, 1.0);
-
-            // System Engine Properties Card
-            const eng_y = bounds.h - 350.0;
-            const eng_h = 100.0;
-            const eng_rect = cocoa.NSRect.init(card_x, eng_y, card_w, eng_h);
-            const eng_bg = cocoa.makeCGColor(0x10131A, 0.95);
-            defer cocoa.CGColorRelease(eng_bg);
-            cocoa.CGContextSetFillColorWithColor(ctx, eng_bg);
-            cocoa.CGContextFillRect(ctx, eng_rect);
-
-            const eng_border = cocoa.makeCGColor(0x1E232E, 0.85);
-            defer cocoa.CGColorRelease(eng_border);
-            cocoa.CGContextSetStrokeColorWithColor(ctx, eng_border);
-            cocoa.CGContextSetLineWidth(ctx, 1.0);
-            cocoa.CGContextStrokeRect(ctx, eng_rect);
-
-            cocoa.drawStringWithColor("ENGINE INVARIANTS:", card_x + 16, eng_y + 74, 0.85, 0.88, 0.94, 1.0);
-            cocoa.drawStringWithColor("• No scan starts at launch", card_x + 16, eng_y + 54, 0.55, 0.60, 0.68, 1.0);
-            cocoa.drawStringWithColor("• Traversal errors remain visible", card_x + 16, eng_y + 36, 0.55, 0.60, 0.68, 1.0);
-            cocoa.drawStringWithColor("• Cleanup safety work is in progress", card_x + 16, eng_y + 18, 0.55, 0.60, 0.68, 1.0);
-
-            // Shortcuts Guide Card
-            const sc_y = bounds.h - 475.0;
-            const sc_h = 105.0;
-            const sc_rect = cocoa.NSRect.init(card_x, sc_y, card_w, sc_h);
-            const sc_bg = cocoa.makeCGColor(0x10131A, 0.95);
-            defer cocoa.CGColorRelease(sc_bg);
-            cocoa.CGContextSetFillColorWithColor(ctx, sc_bg);
-            cocoa.CGContextFillRect(ctx, sc_rect);
-
-            const sc_border = cocoa.makeCGColor(0x1E232E, 0.85);
-            defer cocoa.CGColorRelease(sc_border);
-            cocoa.CGContextSetStrokeColorWithColor(ctx, sc_border);
-            cocoa.CGContextSetLineWidth(ctx, 1.0);
-            cocoa.CGContextStrokeRect(ctx, sc_rect);
-
-            cocoa.drawStringWithColor("QUICK SHORTCUTS:", card_x + 16, sc_y + 80, 0.85, 0.88, 0.94, 1.0);
-            cocoa.drawStringWithColor("⌘O  —  Choose custom target folder", card_x + 16, sc_y + 60, 0.55, 0.60, 0.68, 1.0);
-            cocoa.drawStringWithColor("⌘R  —  Run disk analysis", card_x + 16, sc_y + 42, 0.55, 0.60, 0.68, 1.0);
-            cocoa.drawStringWithColor("⌘1..5 — Quick switch presets", card_x + 16, sc_y + 24, 0.55, 0.60, 0.68, 1.0);
-            cocoa.drawStringWithColor("⌘Q  —  Quit ZSpace", card_x + 16, sc_y + 6, 0.55, 0.60, 0.68, 1.0);
-        } else if (state.scan_state == .scanning) {
-            cocoa.drawStringWithColor("Scanning directory in background...", 34, bounds.h / 2.0, 0.0, 0.90, 1.0, 1.0);
-        } else {
-            cocoa.drawStringWithColor("Empty directory.", 34, bounds.h / 2.0, 0.56, 0.61, 0.68, 1.0);
-        }
-        return;
-    }
-
-    const node = node_opt.?;
-    if (node.children.items.len == 0) {
-        cocoa.drawStringWithColor("Empty directory.", 34, bounds.h / 2.0, 0.56, 0.61, 0.68, 1.0);
-        return;
-    }
-
-    // Draw row items
-    var y: f64 = bounds.h - 32.0;
-    const row_height: f64 = 28.0;
-
-    for (node.children.items, 0..) |child, idx| {
-        if (y < 40.0) break; // keep footer space
-
-        const is_selected = state.selected_indices.get(idx) orelse false;
-
-        // Row highlight if selected
-        if (is_selected) {
-            const row_sel_color = cocoa.makeCGColor(0x00E5FF, 0.15);
-            defer cocoa.CGColorRelease(row_sel_color);
-            cocoa.CGContextSetFillColorWithColor(ctx, row_sel_color);
-            cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(4, y - 2, bounds.w - 8, row_height));
-        }
-
-        // Custom drawn Checkbox (14x14)
-        const box_rect = cocoa.NSRect.init(12, y + 4, 14, 14);
-        const box_border = cocoa.makeCGColor(0x00E5FF, if (is_selected) 1.0 else 0.5);
-        defer cocoa.CGColorRelease(box_border);
-        cocoa.CGContextSetStrokeColorWithColor(ctx, box_border);
-        cocoa.CGContextSetLineWidth(ctx, 1.2);
-        cocoa.CGContextStrokeRect(ctx, box_rect);
-
-        if (is_selected) {
-            const check_fill = cocoa.makeCGColor(0x00E5FF, 0.9);
-            defer cocoa.CGColorRelease(check_fill);
-            cocoa.CGContextSetFillColorWithColor(ctx, check_fill);
-            cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(15, y + 7, 8, 8));
-        }
-
-        // Category indicator dot
-        const dot_color = cocoa.makeCGColor(child.category.colorHex(), 0.9);
-        defer cocoa.CGColorRelease(dot_color);
-        cocoa.CGContextSetFillColorWithColor(ctx, dot_color);
-        cocoa.CGContextFillEllipseInRect(ctx, cocoa.NSRect.init(34, y + 7, 8, 8));
-
-        // File/Folder Name
-        const name_slice = if (child.name.len > 26) child.name[0..26] else child.name;
-        cocoa.drawStringWithColor(name_slice, 50, y + 4, 0.90, 0.92, 0.96, 1.0);
-
-        // Size String on Right
-        var sz_buf: [32]u8 = undefined;
-        const sz_str = types.DiskNode.formatSize(child.size_bytes, &sz_buf);
-        cocoa.drawStringWithColor(sz_str, bounds.w - 90, y + 4, 0.0, 0.90, 1.0, 1.0);
-
-        y -= row_height;
+    if (selected) {
+        cocoa.drawStringWithColor("● SELECTED", x + w - 95, y + 29, 0.0, 0.90, 1.0, 1.0);
     }
 }
 
-fn onSidebarMouseDown(self: cocoa.id, _: cocoa.SEL, event: cocoa.id) callconv(.c) void {
-    const state = global_ui_state orelse return;
-
-    // Get click coordinates
-    const sel_location = cocoa.sel_registerName("locationInWindow");
-    const F_loc = *const fn (cocoa.id, cocoa.SEL) callconv(.c) cocoa.NSPoint;
-    const window_point = @as(F_loc, @ptrCast(&cocoa.objc_msgSend))(event, sel_location);
-
-    const sel_convertPoint = cocoa.sel_registerName("convertPoint:fromView:");
-    const click_point = cocoa.sendConvertPointFromView(self, sel_convertPoint, window_point, null);
-
-    const bounds = cocoa.sendGetRect(self, sel_bounds);
-
-    if (state.scan_state == .idle) {
-        const card_x: f64 = 18.0;
-        const card_w: f64 = bounds.w - 36.0;
-
-        // Button 1: Begin Analysis (⌘R)
-        const btn1_y = bounds.h - 175.0;
-        const btn1_h = 42.0;
-        if (click_point.x >= card_x and click_point.x <= card_x + card_w and
-            click_point.y >= btn1_y and click_point.y <= btn1_y + btn1_h)
-        {
-            if (state.scan_trigger_fn) |trigger| trigger();
-            return;
-        }
-
-        // Button 2: Choose Target (⌘O)
-        const btn2_y = bounds.h - 228.0;
-        const btn2_h = 38.0;
-        if (click_point.x >= card_x and click_point.x <= card_x + card_w and
-            click_point.y >= btn2_y and click_point.y <= btn2_y + btn2_h)
-        {
-            if (state.choose_target_fn) |choose| choose();
-            return;
-        }
-        return;
-    }
-
-    const node = state.drill_node orelse state.root_node orelse return;
-    const row_height: f64 = 28.0;
-    const rel_y = bounds.h - click_point.y;
-
-    if (rel_y > 0 and rel_y < bounds.h - 40.0) {
-        const clicked_idx = @as(usize, @intFromFloat(@floor(rel_y / row_height)));
-        if (clicked_idx < node.children.items.len) {
-            const current = state.selected_indices.get(clicked_idx) orelse false;
-            state.selected_indices.put(clicked_idx, !current) catch return;
-            cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
-        }
-    }
-}
-
-// --- 5. StatusView: Metrics, Daemon Pill & Command Line ---------------------
+// --- 6. StatusView: Metrics & Daemon Indicator -----------------------------
 
 fn drawStatusRect(self: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.c) void {
     _ = dirty;
@@ -963,13 +1278,11 @@ fn drawStatusRect(self: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.c
 
     const bounds = cocoa.sendGetRect(self, sel_bounds);
 
-    // Deep bar #08090D
     const bg_color = cocoa.makeCGColor(0x08090D, 1.0);
     defer cocoa.CGColorRelease(bg_color);
     cocoa.CGContextSetFillColorWithColor(ctx, bg_color);
     cocoa.CGContextFillRect(ctx, bounds);
 
-    // Top hairline stroke
     const line_color = cocoa.makeCGColor(0x282C37, 0.7);
     defer cocoa.CGColorRelease(line_color);
     cocoa.CGContextSetStrokeColorWithColor(ctx, line_color);
@@ -980,15 +1293,12 @@ fn drawStatusRect(self: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.c
     cocoa.CGContextDrawPath(ctx, 2);
 
     const state = global_ui_state orelse return;
-
-    // Status text on left
     cocoa.drawStringWithColor(state.status_text, 18, bounds.h / 2.0 - 7.0, 0.85, 0.88, 0.92, 1.0);
 
-    // Daemon status pill on right
     const pill_color = if (state.daemon_enabled)
-        cocoa.makeCGColor(0x00E676, 0.9) // Active Green
+        cocoa.makeCGColor(0x00E676, 0.9)
     else
-        cocoa.makeCGColor(0x5A6472, 0.7); // Idle Muted Gray
+        cocoa.makeCGColor(0x5A6472, 0.7);
     defer cocoa.CGColorRelease(pill_color);
 
     cocoa.CGContextSetFillColorWithColor(ctx, pill_color);
@@ -1065,6 +1375,7 @@ fn onWorkspaceRailMouseDown(self: cocoa.id, _: cocoa.SEL, event: cocoa.id) callc
     const row = @floor((cocoa.sendGetRect(self, sel_bounds).h - 48.0 - local.y) / 56.0);
     if (row < 0 or row >= workspace_names.len) return;
     state.active_tab = @enumFromInt(@as(u8, @intFromFloat(row)));
+    state.scroll_offset_y = 0.0;
     requestRedraw();
 }
 
@@ -1082,30 +1393,25 @@ pub fn registerViewSubclasses() void {
         cocoa.objc_registerClassPair(cls);
     }
 
-    // 2. ZSpaceSunburstView
-    if (cocoa.objc_getClass("ZSpaceSunburstView") == null) {
-        const cls = cocoa.objc_allocateClassPair(NSView, "ZSpaceSunburstView", 0);
-        _ = cocoa.class_addMethod(cls, sel_drawRect, @ptrCast(&drawSunburstRect), "v@:{CGRect=dddd}");
-        _ = cocoa.class_addMethod(cls, sel_mouseDown, @ptrCast(&onSunburstMouseDown), "v@:@");
+    // 2. ZSpaceStageView (Main Stage)
+    if (cocoa.objc_getClass("ZSpaceStageView") == null) {
+        const cls = cocoa.objc_allocateClassPair(NSView, "ZSpaceStageView", 0);
+        _ = cocoa.class_addMethod(cls, sel_drawRect, @ptrCast(&drawStageRect), "v@:{CGRect=dddd}");
+        _ = cocoa.class_addMethod(cls, sel_mouseDown, @ptrCast(&onStageMouseDown), "v@:@");
+        _ = cocoa.class_addMethod(cls, sel_scrollWheel, @ptrCast(&onStageScrollWheel), "v@:@");
         cocoa.objc_registerClassPair(cls);
     }
 
-    // 3. ZSpaceTreemapView
-    if (cocoa.objc_getClass("ZSpaceTreemapView") == null) {
-        const cls = cocoa.objc_allocateClassPair(NSView, "ZSpaceTreemapView", 0);
-        _ = cocoa.class_addMethod(cls, sel_drawRect, @ptrCast(&drawTreemapRect), "v@:{CGRect=dddd}");
-        _ = cocoa.class_addMethod(cls, sel_mouseDown, @ptrCast(&onTreemapMouseDown), "v@:@");
-        cocoa.objc_registerClassPair(cls);
-    }
-
-    // 4. ZSpaceSidebarView
+    // 3. ZSpaceSidebarView (Inspector)
     if (cocoa.objc_getClass("ZSpaceSidebarView") == null) {
         const cls = cocoa.objc_allocateClassPair(NSView, "ZSpaceSidebarView", 0);
         _ = cocoa.class_addMethod(cls, sel_drawRect, @ptrCast(&drawSidebarRect), "v@:{CGRect=dddd}");
         _ = cocoa.class_addMethod(cls, sel_mouseDown, @ptrCast(&onSidebarMouseDown), "v@:@");
+        _ = cocoa.class_addMethod(cls, sel_scrollWheel, @ptrCast(&onSidebarScrollWheel), "v@:@");
         cocoa.objc_registerClassPair(cls);
     }
 
+    // 4. ZSpaceWorkspaceRailView
     if (cocoa.objc_getClass("ZSpaceWorkspaceRailView") == null) {
         const cls = cocoa.objc_allocateClassPair(NSView, "ZSpaceWorkspaceRailView", 0);
         _ = cocoa.class_addMethod(cls, sel_drawRect, @ptrCast(&drawWorkspaceRailRect), "v@:{CGRect=dddd}");
