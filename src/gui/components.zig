@@ -11,6 +11,10 @@ const theme = @import("theme.zig");
 const sunburst = @import("sunburst.zig");
 const treemap = @import("treemap.zig");
 const tooltips = @import("tooltips.zig");
+const dedup = @import("../core/dedup.zig");
+const analyzer = @import("../core/analyzer.zig");
+const apfs = @import("../core/apfs.zig");
+const cleaner = @import("../core/cleaner.zig");
 
 // --- Global UI State for Native Views --------------------------------------
 
@@ -72,6 +76,10 @@ pub const UIState = struct {
     sidebar_scroll_offset_y: f64 = 0.0,
     selected_node: ?*const types.DiskNode = null,
     hovered_row: ?usize = null,
+    dedup_clusters: ?std.ArrayList(types.DuplicateCluster) = null,
+    quick_wins: ?std.ArrayList(analyzer.SmartCleanItem) = null,
+    dedup_scroll_y: f64 = 0.0,
+    quick_wins_scroll_y: f64 = 0.0,
 
     pub fn init(allocator: std.mem.Allocator) UIState {
         return .{
@@ -82,6 +90,39 @@ pub const UIState = struct {
 
     pub fn deinit(self: *UIState) void {
         self.selected_indices.deinit();
+        self.clearDedup();
+        self.clearQuickWins();
+    }
+
+    pub fn clearDedup(self: *UIState) void {
+        if (self.dedup_clusters) |*dc| {
+            for (dc.items) |*c_item| {
+                c_item.items.deinit(self.allocator);
+            }
+            dc.deinit(self.allocator);
+            self.dedup_clusters = null;
+        }
+    }
+
+    pub fn clearQuickWins(self: *UIState) void {
+        if (self.quick_wins) |*qw| {
+            qw.deinit(self.allocator);
+            self.quick_wins = null;
+        }
+    }
+
+    pub fn refreshDedup(self: *UIState) void {
+        const root = self.root_node orelse return;
+        self.clearDedup();
+        var engine = dedup.DedupEngine.init(self.allocator);
+        self.dedup_clusters = engine.findDuplicates(root) catch null;
+    }
+
+    pub fn refreshQuickWins(self: *UIState) void {
+        const root = self.root_node orelse return;
+        self.clearQuickWins();
+        var an = analyzer.Analyzer.init(self.allocator);
+        self.quick_wins = an.generateSmartCleanRecommendations(root) catch null;
     }
 
     pub fn getTargetPath(self: *const UIState) []const u8 {
@@ -100,7 +141,11 @@ pub const UIState = struct {
         self.drill_node = null;
         self.selected_node = null;
         self.scroll_offset_y = 0.0;
+        self.dedup_scroll_y = 0.0;
+        self.quick_wins_scroll_y = 0.0;
         self.selected_indices.clearRetainingCapacity();
+        self.clearDedup();
+        self.clearQuickWins();
     }
 };
 
@@ -821,6 +866,373 @@ fn onSpacetimeMouseDown(self: cocoa.id, click_point: cocoa.NSPoint, bounds: coco
     requestRedraw();
 }
 
+// --- Dedup Studio (Workspace 2) --------------------------------------------
+
+fn drawDedupStudio(ctx: cocoa.CGContextRef, bounds: cocoa.NSRect, state: *UIState) void {
+    if (state.scan_state == .idle or state.root_node == null) {
+        cocoa.drawStringWithColor("Run disk analysis to identify duplicate clusters and APFS CoW savings.", bounds.w / 2.0 - 220.0, bounds.h / 2.0, 0.55, 0.60, 0.68, 1.0);
+        return;
+    }
+
+    if (state.dedup_clusters == null) {
+        state.refreshDedup();
+    }
+
+    const clusters_opt = state.dedup_clusters;
+    if (clusters_opt == null or clusters_opt.?.items.len == 0) {
+        cocoa.drawStringWithColor("✓ Zero duplicate clusters found! All analyzed objects are unique.", bounds.w / 2.0 - 200.0, bounds.h / 2.0, 0.0, 0.90, 0.46, 1.0);
+        return;
+    }
+
+    const clusters = clusters_opt.?.items;
+
+    // 1. Top Action & Metrics Bar (Height 44px)
+    const top_bar_h: f64 = 44.0;
+    const top_bar_y: f64 = bounds.h - top_bar_h;
+    const bar_bg = cocoa.makeCGColor(0x10131B, 1.0);
+    defer cocoa.CGColorRelease(bar_bg);
+    cocoa.CGContextSetFillColorWithColor(ctx, bar_bg);
+    cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(0, top_bar_y, bounds.w, top_bar_h));
+
+    var total_wasted: u64 = 0;
+    var total_dups: usize = 0;
+    for (clusters) |c| {
+        total_wasted += c.total_wasted_bytes;
+        total_dups += c.items.items.len;
+    }
+    var wst_buf: [32]u8 = undefined;
+    const wst_str = types.DiskNode.formatSize(total_wasted, &wst_buf);
+
+    var metric_buf: [128]u8 = undefined;
+    const metric_str = std.fmt.bufPrint(&metric_buf, "DEDUP STUDIO  •  {d} Clusters ({d} files)  •  Wasted: {s}", .{ clusters.len, total_dups, wst_str }) catch "";
+    cocoa.drawStringWithColor(metric_str, 20.0, top_bar_y + 14.0, 0.0, 0.90, 1.0, 1.0);
+
+    // Button: Clone-All to APFS CoW
+    const btn_w: f64 = 180.0;
+    const btn_h: f64 = 30.0;
+    const btn_x = bounds.w - btn_w - 20.0;
+    const btn_y = top_bar_y + 7.0;
+    renderButton(ctx, cocoa.NSRect.init(btn_x, btn_y, btn_w, btn_h), "⚡  CLONE-ALL COWs", 0x14202C, 0x00E5FF);
+
+    // 2. Render Virtualized Clusters
+    const list_top: f64 = top_bar_y;
+
+    var cur_y: f64 = list_top + state.dedup_scroll_y;
+    for (clusters) |c| {
+        const c_card_h: f64 = 34.0 + @as(f64, @floatFromInt(c.items.items.len)) * 32.0 + 8.0;
+        const card_top = cur_y;
+        cur_y -= c_card_h + 12.0;
+
+        if (card_top - c_card_h > list_top or card_top < 0.0) continue;
+
+        const card_rect = cocoa.NSRect.init(20.0, card_top - c_card_h, bounds.w - 40.0, c_card_h);
+        renderCardBg(ctx, card_rect);
+
+        // Cluster header
+        var sz_b: [32]u8 = undefined;
+        const sz_s = types.DiskNode.formatSize(c.size_each, &sz_b);
+        var cw_b: [32]u8 = undefined;
+        const cw_s = types.DiskNode.formatSize(c.total_wasted_bytes, &cw_b);
+
+        var hex_b: [12]u8 = undefined;
+        const hex_prefix = std.fmt.bufPrint(&hex_b, "{x:0>8}", .{@as(u32, @truncate(c.hash))}) catch "hash";
+
+        var c_hdr_buf: [128]u8 = undefined;
+        const c_hdr = std.fmt.bufPrint(&c_hdr_buf, "Cluster #{s}  •  {s} each  •  {d} copies  •  Wasted: {s}", .{ hex_prefix, sz_s, c.items.items.len, cw_s }) catch "";
+        cocoa.drawStringWithColor(c_hdr, 34.0, card_top - 24.0, 0.0, 0.90, 1.0, 1.0);
+
+        // Items inside cluster
+        for (c.items.items, 0..) |it, it_idx| {
+            const row_y = card_top - 34.0 - @as(f64, @floatFromInt(it_idx + 1)) * 32.0;
+            const is_orig = (it_idx == 0);
+
+            // Badge
+            if (is_orig) {
+                const orig_badge = cocoa.makeCGColor(0x00E676, 0.2);
+                defer cocoa.CGColorRelease(orig_badge);
+                cocoa.CGContextSetFillColorWithColor(ctx, orig_badge);
+                cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(34.0, row_y + 4.0, 85.0, 20.0));
+                cocoa.drawStringWithColor("★ ORIGINAL", 40.0, row_y + 7.0, 0.0, 0.90, 0.46, 1.0);
+            } else {
+                const dup_badge = cocoa.makeCGColor(0x00E5FF, 0.15);
+                defer cocoa.CGColorRelease(dup_badge);
+                cocoa.CGContextSetFillColorWithColor(ctx, dup_badge);
+                cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(34.0, row_y + 4.0, 85.0, 20.0));
+                cocoa.drawStringWithColor("DUPLICATE", 44.0, row_y + 7.0, 0.0, 0.90, 1.0, 1.0);
+
+                // Action buttons on right for duplicates
+                const rcl_w: f64 = 110.0;
+                const rcl_x = bounds.w - 40.0 - rcl_w - 90.0;
+                renderButton(ctx, cocoa.NSRect.init(rcl_x, row_y + 3.0, rcl_w, 24.0), "⚡ CoW Clone", 0x14202C, 0x00E5FF);
+
+                const trsh_x = bounds.w - 40.0 - 80.0;
+                renderButton(ctx, cocoa.NSRect.init(trsh_x, row_y + 3.0, 70.0, 24.0), "🗑 Trash", 0x221313, 0xFF3D00);
+            }
+
+            // Path
+            const max_p_chars: usize = @intFromFloat(@max(10.0, (bounds.w - 360.0) / 8.0));
+            const it_path = if (it.path.len > max_p_chars) it.path[0..max_p_chars] else it.path;
+            cocoa.drawStringWithColor(it_path, 130.0, row_y + 7.0, 0.82, 0.86, 0.92, 1.0);
+        }
+    }
+}
+
+fn onDedupStudioMouseDown(self: cocoa.id, click_point: cocoa.NSPoint, bounds: cocoa.NSRect, state: *UIState) void {
+    const clusters_opt = state.dedup_clusters orelse return;
+    const top_bar_h: f64 = 44.0;
+    const top_bar_y: f64 = bounds.h - top_bar_h;
+
+    // Check "CLONE-ALL COWs" button click
+    const btn_w: f64 = 180.0;
+    const btn_h: f64 = 30.0;
+    const btn_x = bounds.w - btn_w - 20.0;
+    const btn_y = top_bar_y + 7.0;
+    if (click_point.x >= btn_x and click_point.x <= btn_x + btn_w and
+        click_point.y >= btn_y and click_point.y <= btn_y + btn_h)
+    {
+        var clones_done: usize = 0;
+        var bytes_saved: u64 = 0;
+        for (clusters_opt.items) |c| {
+            if (c.items.items.len < 2) continue;
+            const orig = c.items.items[0];
+            for (c.items.items[1..]) |dup| {
+                const res = apfs.ApfsEngine.cloneDeduplicate(orig.path, dup.path, c.size_each);
+                if (res.success) {
+                    clones_done += 1;
+                    bytes_saved += c.size_each;
+                }
+            }
+        }
+        state.status_text = "APFS CoW Batch: Cloned duplicates, reclaimed physical space";
+        cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
+        requestRedraw();
+        return;
+    }
+
+    // Check individual buttons in cluster cards
+    const list_top: f64 = top_bar_y;
+    var cur_y: f64 = list_top + state.dedup_scroll_y;
+    for (clusters_opt.items) |c| {
+        const c_card_h: f64 = 34.0 + @as(f64, @floatFromInt(c.items.items.len)) * 32.0 + 8.0;
+        const card_top = cur_y;
+        cur_y -= c_card_h + 12.0;
+
+        if (click_point.y > card_top or click_point.y < card_top - c_card_h) continue;
+
+        if (c.items.items.len < 2) continue;
+        const orig = c.items.items[0];
+
+        for (c.items.items, 0..) |it, it_idx| {
+            if (it_idx == 0) continue;
+            const row_y = card_top - 34.0 - @as(f64, @floatFromInt(it_idx + 1)) * 32.0;
+            if (click_point.y < row_y + 3.0 or click_point.y > row_y + 27.0) continue;
+
+            const rcl_w: f64 = 110.0;
+            const rcl_x = bounds.w - 40.0 - rcl_w - 90.0;
+            if (click_point.x >= rcl_x and click_point.x <= rcl_x + rcl_w) {
+                // CoW Clone clicked
+                const res = apfs.ApfsEngine.cloneDeduplicate(orig.path, it.path, c.size_each);
+                if (res.success) {
+                    state.status_text = "Item deduplicated via APFS CoW clone (100% space saved, zero file loss)";
+                } else {
+                    state.status_text = "APFS CoW clone failed (cross-device or read-only)";
+                }
+                cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
+                requestRedraw();
+                return;
+            }
+
+            const trsh_x = bounds.w - 40.0 - 80.0;
+            if (click_point.x >= trsh_x and click_point.x <= trsh_x + 70.0) {
+                // Trash clicked
+                var cl = cleaner.Cleaner.init(state.allocator) catch return;
+                defer cl.deinit();
+                _ = cl.safeMoveToTrash(it.path, c.size_each, .None) catch {
+                    state.status_text = "Failed to move duplicate to Trash";
+                    cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
+                    requestRedraw();
+                    return;
+                };
+                state.status_text = "Duplicate moved to Trash (reversible via journal)";
+                state.refreshDedup();
+                cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
+                requestRedraw();
+                return;
+            }
+        }
+    }
+}
+
+// --- Quick-Wins Sweeper (Workspace 3) ---------------------------------------
+
+fn drawQuickWinsSweeper(ctx: cocoa.CGContextRef, bounds: cocoa.NSRect, state: *UIState) void {
+    if (state.scan_state == .idle or state.root_node == null) {
+        cocoa.drawStringWithColor("Run disk analysis to discover quick-win storage reclamation opportunities.", bounds.w / 2.0 - 240.0, bounds.h / 2.0, 0.55, 0.60, 0.68, 1.0);
+        return;
+    }
+
+    if (state.quick_wins == null) {
+        state.refreshQuickWins();
+    }
+
+    const items_opt = state.quick_wins;
+    if (items_opt == null or items_opt.?.items.len == 0) {
+        cocoa.drawStringWithColor("✓ Clean system! No junk caches or stale build artifacts found.", bounds.w / 2.0 - 200.0, bounds.h / 2.0, 0.0, 0.90, 0.46, 1.0);
+        return;
+    }
+
+    const items = items_opt.?.items;
+
+    // 1. Top Action & Metrics Bar (Height 44px)
+    const top_bar_h: f64 = 44.0;
+    const top_bar_y: f64 = bounds.h - top_bar_h;
+    const bar_bg = cocoa.makeCGColor(0x10131B, 1.0);
+    defer cocoa.CGColorRelease(bar_bg);
+    cocoa.CGContextSetFillColorWithColor(ctx, bar_bg);
+    cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(0, top_bar_y, bounds.w, top_bar_h));
+
+    var total_reclaimable: u64 = 0;
+    var safe_reclaimable: u64 = 0;
+    for (items) |it| {
+        total_reclaimable += it.size_bytes;
+        if (it.risk == .Safe_ZeroRisk) {
+            safe_reclaimable += it.size_bytes;
+        }
+    }
+
+    var rcl_buf: [32]u8 = undefined;
+    const rcl_str = types.DiskNode.formatSize(total_reclaimable, &rcl_buf);
+    var safe_buf: [32]u8 = undefined;
+    const safe_str = types.DiskNode.formatSize(safe_reclaimable, &safe_buf);
+
+    var metric_buf: [128]u8 = undefined;
+    const metric_str = std.fmt.bufPrint(&metric_buf, "QUICK-WINS SWEEPER  •  {d} Targets  •  Total: {s}  •  Zero-Risk: {s}", .{ items.len, rcl_str, safe_str }) catch "";
+    cocoa.drawStringWithColor(metric_str, 20.0, top_bar_y + 14.0, 0.0, 0.90, 0.46, 1.0);
+
+    // Button: Reclaim All Zero-Risk
+    const btn_w: f64 = 230.0;
+    const btn_h: f64 = 30.0;
+    const btn_x = bounds.w - btn_w - 20.0;
+    const btn_y = top_bar_y + 7.0;
+    renderButton(ctx, cocoa.NSRect.init(btn_x, btn_y, btn_w, btn_h), "⚡  RECLAIM ALL ZERO-RISK", 0x14281E, 0x00E676);
+
+    // 2. Render Cards List
+    const list_top: f64 = top_bar_y;
+    const card_h: f64 = 62.0;
+    const card_margin: f64 = 10.0;
+
+    var cur_y: f64 = list_top + state.quick_wins_scroll_y;
+    for (items) |it| {
+        const card_top = cur_y;
+        cur_y -= card_h + card_margin;
+
+        if (card_top - card_h > list_top or card_top < 0.0) continue;
+
+        const card_rect = cocoa.NSRect.init(20.0, card_top - card_h, bounds.w - 40.0, card_h);
+        renderCardBg(ctx, card_rect);
+
+        // Left accent indicator based on risk
+        const accent_hex: u32 = switch (it.risk) {
+            .Safe_ZeroRisk => 0x00E676,
+            .Recommended_Cache => 0x00E5FF,
+            .Review_Needed => 0xFFB300,
+            .Locked_Danger => 0xFF3D00,
+        };
+        const acc_col = cocoa.makeCGColor(accent_hex, 1.0);
+        defer cocoa.CGColorRelease(acc_col);
+        cocoa.CGContextSetFillColorWithColor(ctx, acc_col);
+        cocoa.CGContextFillRect(ctx, cocoa.NSRect.init(20.0, card_top - card_h, 4.0, card_h));
+
+        // Risk label
+        const risk_lbl = it.risk.label();
+        cocoa.drawStringWithColor(risk_lbl, 34.0, card_top - 20.0, if (it.risk == .Safe_ZeroRisk) 0.0 else 0.0, if (it.risk == .Safe_ZeroRisk) 0.90 else 0.85, if (it.risk == .Safe_ZeroRisk) 0.46 else 0.95, 1.0);
+
+        // Title
+        cocoa.drawStringWithColor(it.title, 34.0, card_top - 38.0, 0.95, 0.96, 0.99, 1.0);
+
+        // Path
+        const max_p_chars: usize = @intFromFloat(@max(10.0, (bounds.w - 320.0) / 8.0));
+        const p_disp = if (it.path.len > max_p_chars) it.path[0..max_p_chars] else it.path;
+        cocoa.drawStringWithColor(p_disp, 34.0, card_top - 54.0, 0.55, 0.60, 0.68, 1.0);
+
+        // Size badge & Reclaim button on right
+        var sz_b: [32]u8 = undefined;
+        const sz_s = types.DiskNode.formatSize(it.size_bytes, &sz_b);
+        cocoa.drawStringWithColor(sz_s, bounds.w - 240.0, card_top - 36.0, 0.0, 0.90, 1.0, 1.0);
+
+        const rcl_btn_rect = cocoa.NSRect.init(bounds.w - 140.0, card_top - card_h + 16.0, 100.0, 30.0);
+        renderButton(ctx, rcl_btn_rect, "🗑  RECLAIM", 0x221313, 0xFF3D00);
+    }
+}
+
+fn onQuickWinsMouseDown(self: cocoa.id, click_point: cocoa.NSPoint, bounds: cocoa.NSRect, state: *UIState) void {
+    const items_opt = state.quick_wins orelse return;
+    const top_bar_h: f64 = 44.0;
+    const top_bar_y: f64 = bounds.h - top_bar_h;
+
+    // Check "RECLAIM ALL ZERO-RISK" button click
+    const btn_w: f64 = 230.0;
+    const btn_h: f64 = 30.0;
+    const btn_x = bounds.w - btn_w - 20.0;
+    const btn_y = top_bar_y + 7.0;
+    if (click_point.x >= btn_x and click_point.x <= btn_x + btn_w and
+        click_point.y >= btn_y and click_point.y <= btn_y + btn_h)
+    {
+        var cl = cleaner.Cleaner.init(state.allocator) catch return;
+        defer cl.deinit();
+
+        var reclaimed: u64 = 0;
+        for (items_opt.items) |it| {
+            if (it.risk == .Safe_ZeroRisk) {
+                _ = cl.safeMoveToTrash(it.path, it.size_bytes, .None) catch continue;
+                reclaimed += it.size_bytes;
+            }
+        }
+        var sz_b: [32]u8 = undefined;
+        const sz_s = types.DiskNode.formatSize(reclaimed, &sz_b);
+        var msg_buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "Reclaimed {s} of zero-risk caches into Trash (reversible)", .{sz_s}) catch "Reclaimed zero-risk caches";
+        state.status_text = msg;
+        state.refreshQuickWins();
+        cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
+        requestRedraw();
+        return;
+    }
+
+    // Check individual RECLAIM buttons
+    const list_top: f64 = top_bar_y;
+    const card_h: f64 = 62.0;
+    const card_margin: f64 = 10.0;
+
+    var cur_y: f64 = list_top + state.quick_wins_scroll_y;
+    for (items_opt.items) |it| {
+        const card_top = cur_y;
+        cur_y -= card_h + card_margin;
+
+        if (click_point.y > card_top or click_point.y < card_top - card_h) continue;
+
+        const btn_rect_x = bounds.w - 140.0;
+        const btn_rect_y = card_top - card_h + 16.0;
+        if (click_point.x >= btn_rect_x and click_point.x <= btn_rect_x + 100.0 and
+            click_point.y >= btn_rect_y and click_point.y <= btn_rect_y + 30.0)
+        {
+            var cl = cleaner.Cleaner.init(state.allocator) catch return;
+            defer cl.deinit();
+            _ = cl.safeMoveToTrash(it.path, it.size_bytes, .None) catch {
+                state.status_text = "Failed to move target cache to Trash";
+                cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
+                requestRedraw();
+                return;
+            };
+            state.status_text = "Cache moved to Trash safely (reversible via journal)";
+            state.refreshQuickWins();
+            cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
+            requestRedraw();
+            return;
+        }
+    }
+}
+
 // --- 4. Main Stage View Subclass -------------------------------------------
 
 fn drawStageRect(self: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.c) void {
@@ -840,6 +1252,8 @@ fn drawStageRect(self: cocoa.id, _: cocoa.SEL, dirty: cocoa.NSRect) callconv(.c)
     const state = global_ui_state orelse return;
     switch (state.active_tab) {
         .super_finder => drawSuperFinder(ctx, bounds, state),
+        .dedup_studio => drawDedupStudio(ctx, bounds, state),
+        .quick_wins => drawQuickWinsSweeper(ctx, bounds, state),
         .spacetime_visualizer => drawSpacetimeVisualizer(ctx, bounds, state),
         else => drawWorkspacePlaceholder(ctx, bounds, state.active_tab),
     }
@@ -857,6 +1271,8 @@ fn onStageMouseDown(self: cocoa.id, _: cocoa.SEL, event: cocoa.id) callconv(.c) 
 
     switch (state.active_tab) {
         .super_finder => onSuperFinderMouseDown(self, click_point, bounds, state, event),
+        .dedup_studio => onDedupStudioMouseDown(self, click_point, bounds, state),
+        .quick_wins => onQuickWinsMouseDown(self, click_point, bounds, state),
         .spacetime_visualizer => onSpacetimeMouseDown(self, click_point, bounds, state),
         else => {},
     }
@@ -868,7 +1284,12 @@ fn onStageScrollWheel(self: cocoa.id, _: cocoa.SEL, event: cocoa.id) callconv(.c
     const F_delta = *const fn (cocoa.id, cocoa.SEL) callconv(.c) f64;
     const dy = @as(F_delta, @ptrCast(&cocoa.objc_msgSend))(event, sel_deltaY);
 
-    state.scroll_offset_y = @max(0.0, state.scroll_offset_y - dy);
+    switch (state.active_tab) {
+        .super_finder => state.scroll_offset_y = @max(0.0, state.scroll_offset_y - dy),
+        .dedup_studio => state.dedup_scroll_y = @max(0.0, state.dedup_scroll_y - dy),
+        .quick_wins => state.quick_wins_scroll_y = @max(0.0, state.quick_wins_scroll_y - dy),
+        else => {},
+    }
     cocoa.sendVoidBool(self, sel_setNeedsDisplay, true);
 }
 
@@ -1376,6 +1797,12 @@ fn onWorkspaceRailMouseDown(self: cocoa.id, _: cocoa.SEL, event: cocoa.id) callc
     if (row < 0 or row >= workspace_names.len) return;
     state.active_tab = @enumFromInt(@as(u8, @intFromFloat(row)));
     state.scroll_offset_y = 0.0;
+    if (state.active_tab == .dedup_studio and state.dedup_clusters == null and state.root_node != null) {
+        state.refreshDedup();
+    }
+    if (state.active_tab == .quick_wins and state.quick_wins == null and state.root_node != null) {
+        state.refreshQuickWins();
+    }
     requestRedraw();
 }
 

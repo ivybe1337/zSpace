@@ -651,3 +651,68 @@ test "Phase 1: Super Finder virtualized scroll window calculation" {
     }
 }
 
+test "Phase 2: Dedup Studio and Quick-Wins Sweeper engine integration" {
+    const allocator = std.testing.allocator;
+
+    var ui_state = components.UIState.init(allocator);
+    defer ui_state.deinit();
+
+    // Verify initial states
+    try std.testing.expect(ui_state.dedup_clusters == null);
+    try std.testing.expect(ui_state.quick_wins == null);
+
+    // Mock tree
+    var root = types.DiskNode{
+        .name = "root",
+        .path = "/mock/root",
+        .kind = .directory,
+        .size_bytes = 100 * 1024 * 1024,
+        .protection = .None,
+    };
+    defer root.children.deinit(allocator);
+
+    var derived = types.DiskNode{
+        .name = "DerivedData",
+        .path = "/mock/root/DerivedData",
+        .kind = .directory,
+        .size_bytes = 25 * 1024 * 1024,
+        .protection = .None,
+    };
+    defer derived.children.deinit(allocator);
+    try root.children.append(allocator, &derived);
+
+    var git_repo = types.DiskNode{
+        .name = ".git",
+        .path = "/mock/root/.git",
+        .kind = .directory,
+        .size_bytes = 5 * 1024 * 1024,
+        .protection = .GitRepository,
+    };
+    defer git_repo.children.deinit(allocator);
+    try root.children.append(allocator, &git_repo);
+
+    ui_state.root_node = &root;
+
+    // Test Quick-Wins recommendation generation
+    ui_state.refreshQuickWins();
+    try std.testing.expect(ui_state.quick_wins != null);
+    const qw = ui_state.quick_wins.?;
+    try std.testing.expect(qw.items.len > 0);
+    // DerivedData must be found with Safe_ZeroRisk
+    var found_derived = false;
+    for (qw.items) |item| {
+        if (std.mem.indexOf(u8, item.title, "DerivedData") != null) {
+            found_derived = true;
+            try std.testing.expectEqual(analyzer.RiskLevel.Safe_ZeroRisk, item.risk);
+        }
+        // .git must NOT be in smart clean list
+        try std.testing.expect(!std.mem.eql(u8, item.path, "/mock/root/.git"));
+    }
+    try std.testing.expect(found_derived);
+
+    // Clear state
+    ui_state.clearQuickWins();
+    try std.testing.expect(ui_state.quick_wins == null);
+}
+
+

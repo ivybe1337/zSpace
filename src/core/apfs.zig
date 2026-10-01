@@ -1,6 +1,8 @@
 const std = @import("std");
+const types = @import("types.zig");
 
 const c = @cImport({
+    @cInclude("stdio.h");
     @cInclude("sys/attr.h");
     @cInclude("sys/mount.h");
     @cInclude("sys/stat.h");
@@ -39,6 +41,10 @@ pub const ApfsEngine = struct {
         var dup_z: [4096]u8 = undefined;
         var tmp_z: [4096]u8 = undefined;
 
+        if (std.mem.eql(u8, source_path, duplicate_path)) {
+            return .{ .bytes_freed = 0, .success = true, .error_msg = null };
+        }
+
         if (source_path.len >= src_z.len - 1 or duplicate_path.len >= dup_z.len - 1) {
             return .{ .bytes_freed = 0, .success = false, .error_msg = "Path exceeds buffer limits" };
         }
@@ -49,7 +55,7 @@ pub const ApfsEngine = struct {
         @memcpy(dup_z[0..duplicate_path.len], duplicate_path);
         dup_z[duplicate_path.len] = 0;
 
-        const now = std.time.nanoTimestamp();
+        const now = types.getRealtimeNs();
         _ = std.fmt.bufPrint(&tmp_z, "{s}.zclone_{d}", .{ duplicate_path, now }) catch {
             return .{ .bytes_freed = 0, .success = false, .error_msg = "Temporary buffer allocation failed" };
         };
